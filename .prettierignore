@@ -1,0 +1,4 @@
+node_modules/
+dist/
+coverage/
+tests/fixtures/app-workspace/node_modules/

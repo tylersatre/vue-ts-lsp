@@ -1,0 +1,28 @@
+.chief/
+node_modules/
+dist/
+*.js.map
+*.d.ts.map
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.*
+
+# Build artifacts
+*.tsbuildinfo
+*.tgz
+
+# Logs
+*.log
+npm-debug.log*
+
+# Coverage
+coverage/

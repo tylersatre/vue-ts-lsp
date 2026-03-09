@@ -1,0 +1,19 @@
+{
+    "compilerOptions": {
+        "strict": true,
+        "target": "ES2022",
+        "module": "Node16",
+        "moduleResolution": "Node16",
+        "rootDir": ".",
+        "noEmit": true,
+        "esModuleInterop": true,
+        "skipLibCheck": true,
+        "types": ["node", "vitest/globals"],
+        "baseUrl": ".",
+        "paths": {
+            "@src/*": ["src/*"]
+        }
+    },
+    "include": ["tests/**/*.ts"],
+    "exclude": ["tests/fixtures/**", "node_modules", "dist"]
+}

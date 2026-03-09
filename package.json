@@ -1,0 +1,67 @@
+{
+    "name": "vue-ts-lsp",
+    "version": "0.1.0",
+    "description": "Unified Vue + TypeScript LSP proxy for Claude Code",
+    "type": "module",
+    "bin": {
+        "vue-ts-lsp": "./dist/index.js"
+    },
+    "scripts": {
+        "prepare": "tsup",
+        "build": "tsup",
+        "format": "prettier --write .",
+        "format:check": "prettier --check .",
+        "install:smoke-fixture": "npm install --prefix tests/fixtures/app-workspace",
+        "test": "vitest run",
+        "typecheck": "npm run typecheck:src && npm run typecheck:tests",
+        "typecheck:src": "tsc --project tsconfig.json --noEmit",
+        "typecheck:tests": "tsc --project tsconfig.tests.json --noEmit",
+        "release": "npm run build && changeset publish",
+        "changeset": "changeset"
+    },
+    "dependencies": {
+        "@vtsls/language-server": "^0.3.0",
+        "@vue/language-server": "^3.0.0",
+        "typescript": "^5.7.3",
+        "vscode-jsonrpc": "^8.2.1",
+        "vscode-languageserver-protocol": "^3.17.5"
+    },
+    "devDependencies": {
+        "@changesets/cli": "^2.30.0",
+        "@types/node": "^22.13.10",
+        "prettier": "^3.8.1",
+        "tsup": "^8.4.0",
+        "vitest": "^3.0.8"
+    },
+    "publishConfig": {
+        "registry": "https://registry.npmjs.org",
+        "access": "public"
+    },
+    "engines": {
+        "node": ">=18.0.0"
+    },
+    "license": "MIT",
+    "author": "Tyler Satre <github@satre.co>",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/tylersatre/vue-ts-lsp.git"
+    },
+    "homepage": "https://github.com/tylersatre/vue-ts-lsp#readme",
+    "bugs": {
+        "url": "https://github.com/tylersatre/vue-ts-lsp/issues"
+    },
+    "keywords": [
+        "lsp",
+        "language-server",
+        "vue",
+        "typescript",
+        "claude-code",
+        "vtsls",
+        "vue-language-server"
+    ],
+    "files": [
+        "dist",
+        ".lsp.json",
+        ".claude-plugin"
+    ]
+}

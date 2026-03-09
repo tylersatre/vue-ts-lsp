@@ -1,0 +1,14 @@
+{
+    "name": "vue-ts-lsp",
+    "owner": {
+        "name": "Tyler Satre",
+        "email": "github@satre.co"
+    },
+    "plugins": [
+        {
+            "name": "vue-ts-lsp",
+            "source": "./",
+            "description": "Vue + TypeScript LSP for Claude Code"
+        }
+    ]
+}

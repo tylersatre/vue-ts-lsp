@@ -1,0 +1,5 @@
+{
+    "name": "vue-ts-lsp",
+    "version": "0.1.0",
+    "description": "Vue + TypeScript LSP for Claude Code"
+}

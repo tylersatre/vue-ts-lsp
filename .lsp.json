@@ -1,0 +1,13 @@
+{
+    "vue-ts-lsp": {
+        "command": "vue-ts-lsp",
+        "extensionToLanguage": {
+            ".vue": "vue",
+            ".ts": "typescript",
+            ".tsx": "typescriptreact",
+            ".js": "javascript",
+            ".jsx": "javascriptreact"
+        },
+        "startupTimeout": 30000
+    }
+}
