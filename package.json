@@ -22,7 +22,7 @@
     "dependencies": {
         "@vtsls/language-server": "^0.3.0",
         "@vue/language-server": "^3.0.0",
-        "typescript": "^5.7.3",
+        "typescript": "^6.0.2",
         "vscode-jsonrpc": "^8.2.1",
         "vscode-languageserver-protocol": "^3.17.5"
     },
