@@ -1,7 +1,7 @@
 [![CI](https://github.com/tylersatre/vue-ts-lsp/actions/workflows/ci.yml/badge.svg)](https://github.com/tylersatre/vue-ts-lsp/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/vue-ts-lsp.svg)](https://www.npmjs.com/package/vue-ts-lsp)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Node.js >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](https://nodejs.org)
+[![Node.js >= 20.19.0](https://img.shields.io/badge/node-%3E%3D20.19.0-brightgreen.svg)](https://nodejs.org)
 
 # vue-ts-lsp
 
@@ -192,15 +192,26 @@ npm install
 
 > **Note:** The repo includes `.claude/settings.json` which enables the `typescript-lsp` plugin for Claude Code. This gives contributors TypeScript LSP support while working on this project. If it conflicts with your setup, you can override it in `.claude/settings.local.json`.
 
-### Adding changesets
+### Releasing
 
-This project uses [changesets](https://github.com/changesets/changesets) for versioning and releases. When submitting a PR with user-facing changes, add a changeset:
+This project uses [changesets](https://github.com/changesets/changesets) for versioning and npm publishing. **Do not create GitHub releases manually** — the CI handles it.
+
+#### 1. Add a changeset with your PR
+
+When submitting a PR with user-facing changes, add a changeset:
 
 ```bash
 npx changeset
 ```
 
-You'll be prompted to select the version bump type (major, minor, or patch) and a summary. Commit the generated changeset file with your PR.
+You'll be prompted to select the version bump type (major, minor, or patch) and a summary. Commit the generated `.changeset/*.md` file with your PR.
+
+#### 2. Merge to main
+
+When the PR merges, the [Release workflow](.github/workflows/release.yml) runs automatically and does one of two things:
+
+- **Pending changesets exist**: the `changesets/action` opens (or updates) a "Version Packages" PR that bumps `package.json`, updates `CHANGELOG.md`, and removes consumed changeset files.
+- **No pending changesets** (i.e., the "Version Packages" PR was just merged): the action runs `npm run release`, which builds the package and publishes to npm, then creates a GitHub release.
 
 ## License
 
