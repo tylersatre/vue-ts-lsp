@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1
+
+### Patch Changes
+
+- 4fb56b1: Refresh the published package metadata after the post-update lockfile regeneration.
+
 ## 0.2.0
 
 ### Minor Changes

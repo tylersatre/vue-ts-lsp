@@ -1,6 +1,6 @@
 {
     "name": "vue-ts-lsp",
-    "version": "0.2.0",
+    "version": "0.2.1",
     "description": "Unified Vue + TypeScript LSP proxy for Claude Code",
     "type": "module",
     "bin": {
