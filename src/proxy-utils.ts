@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { MessageConnection } from 'vscode-jsonrpc/node.js'
+import type { MessageConnection } from 'vscode-jsonrpc/node'
 import type { InitializeParams, Position, Range } from 'vscode-languageserver-protocol'
 import { computeDocumentEnd } from './documents.js'
 import type {

@@ -1,4 +1,4 @@
-import type { MessageConnection } from 'vscode-jsonrpc/node.js'
+import type { MessageConnection } from 'vscode-jsonrpc/node'
 import type { Position } from 'vscode-languageserver-protocol'
 import type { ProxyContext } from './proxy-context.js'
 import { VUE_HOVER_TIMEOUT_MS, VUE_LOADING_HOVER_RETRY_DELAY_MS, TS_EXECUTION_TARGET_SEMANTIC, DownstreamRequestTimeoutError } from './proxy-types.js'

@@ -1,4 +1,4 @@
-import type { MessageConnection } from 'vscode-jsonrpc/node.js'
+import type { MessageConnection } from 'vscode-jsonrpc/node'
 import type { InitializeParams } from 'vscode-languageserver-protocol'
 import { DocumentStore } from './documents.js'
 import { DiagnosticsStore } from './diagnostics.js'

@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import path from 'node:path'
-import { createMessageConnection, StreamMessageReader, StreamMessageWriter, type MessageConnection } from 'vscode-jsonrpc/node.js'
+import { createMessageConnection, StreamMessageReader, StreamMessageWriter, type MessageConnection } from 'vscode-jsonrpc/node'
 
 export function spawnServer(command: string, args: string[]): { conn: MessageConnection; kill: () => void } {
     const child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'] })
