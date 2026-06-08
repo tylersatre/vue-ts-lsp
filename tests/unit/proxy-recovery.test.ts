@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { MessageConnection } from 'vscode-jsonrpc/node.js'
+import type { MessageConnection } from 'vscode-jsonrpc/node'
 import { createProxyContext } from '@src/proxy-context.js'
 import { recoverVueLs } from '@src/proxy-recovery.js'
 

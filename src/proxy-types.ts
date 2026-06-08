@@ -1,4 +1,4 @@
-import type { MessageConnection } from 'vscode-jsonrpc/node.js'
+import type { MessageConnection } from 'vscode-jsonrpc/node'
 import type { Position, Range } from 'vscode-languageserver-protocol'
 import type { LogLevel } from './logger.js'
 

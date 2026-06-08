@@ -4,7 +4,7 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { TextDocumentSyncKind } from 'vscode-languageserver-protocol'
-import type { MessageConnection } from 'vscode-jsonrpc/node.js'
+import type { MessageConnection } from 'vscode-jsonrpc/node'
 
 vi.mock('node:module', () => ({
     createRequire: vi.fn(() =>

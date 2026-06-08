@@ -1,4 +1,4 @@
-import type { MessageConnection } from 'vscode-jsonrpc/node.js'
+import type { MessageConnection } from 'vscode-jsonrpc/node'
 import type { ProxyContext } from './proxy-context.js'
 import { normalizeSpawnedConnection, buildVtslsInitParams, buildVtslsSettings, buildVueLsInitParams, buildVueLsSettings, isVueUri } from './proxy-utils.js'
 import * as logger from './logger.js'

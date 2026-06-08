@@ -1,4 +1,4 @@
-import { createMessageConnection, StreamMessageReader, StreamMessageWriter, type MessageConnection } from 'vscode-jsonrpc/node.js'
+import { createMessageConnection, StreamMessageReader, StreamMessageWriter, type MessageConnection } from 'vscode-jsonrpc/node'
 
 /** Creates the stdin/stdout JSON-RPC transport. stdout must stay protocol-only. */
 export function createUpstreamConnection(): MessageConnection {

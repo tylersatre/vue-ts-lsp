@@ -1,4 +1,4 @@
-import type { MessageConnection } from 'vscode-jsonrpc/node.js'
+import type { MessageConnection } from 'vscode-jsonrpc/node'
 import type { ProxyContext } from './proxy-context.js'
 import type { ContentChange } from './proxy-types.js'
 import { isVueUri, isScriptLikeUri, summarizePayload, buildVtslsSettings, buildVueLsSettings, patchFullDocReplacements } from './proxy-utils.js'

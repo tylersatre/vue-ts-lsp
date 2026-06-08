@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { PassThrough } from 'node:stream'
 
-vi.mock('vscode-jsonrpc/node.js', () => {
+vi.mock('vscode-jsonrpc/node', () => {
     const mockConnection = {
         sendRequest: vi.fn(),
         sendNotification: vi.fn(),
@@ -18,7 +18,7 @@ vi.mock('vscode-jsonrpc/node.js', () => {
     }
 })
 
-const { createMessageConnection, StreamMessageReader, StreamMessageWriter } = await import('vscode-jsonrpc/node.js')
+const { createMessageConnection, StreamMessageReader, StreamMessageWriter } = await import('vscode-jsonrpc/node')
 const { createUpstreamConnection } = await import('@src/upstream.js')
 
 describe('createUpstreamConnection', () => {
