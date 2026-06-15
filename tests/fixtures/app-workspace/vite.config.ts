@@ -36,7 +36,8 @@ export default defineConfig({
         dir: 'tests',
         setupFiles: ['./tests/setup.ts'],
         environment: 'jsdom',
-        globals: true
+        globals: true,
+        passWithNoTests: true
     },
     css: {
         preprocessorOptions: {
