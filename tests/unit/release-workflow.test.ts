@@ -7,8 +7,8 @@ const RELEASE_WORKFLOW_PATH = path.resolve(process.cwd(), '.github', 'workflows'
 describe('release workflow', () => {
     it('installs smoke fixture dependencies before running tests', () => {
         const workflow = fs.readFileSync(RELEASE_WORKFLOW_PATH, 'utf8')
-        const installStep = "run: npm run install:smoke-fixture"
-        const testStep = "run: npm test"
+        const installStep = 'run: npm run install:smoke-fixture'
+        const testStep = 'run: npm test'
 
         expect(workflow).toContain(installStep)
         expect(workflow.indexOf(installStep)).toBeGreaterThanOrEqual(0)
