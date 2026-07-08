@@ -191,6 +191,10 @@ describe('setupProxy', () => {
         expect(caps['referencesProvider']).toBe(true)
         expect(caps['workspaceSymbolProvider']).toBe(true)
         expect(caps['callHierarchyProvider']).toBe(true)
+        expect(caps['diagnosticProvider']).toEqual({
+            interFileDependencies: true,
+            workspaceDiagnostics: false
+        })
     })
 
     it('forwards initialized notification to both child servers', () => {
@@ -435,6 +439,86 @@ describe('document synchronization forwarding', () => {
         upstream.triggerNotification('textDocument/didOpen', params)
         expect(vtslsConn.sendNotification).toHaveBeenCalledWith('textDocument/didOpen', params)
         expect(vueLsConn.sendNotification).toHaveBeenCalledWith('textDocument/didOpen', params)
+    })
+
+    it('nudges Vue diagnostics with a debounced geterr request after didOpen', async () => {
+        vi.useFakeTimers()
+        await upstream.triggerRequest('initialize', initParams)
+        vtslsConn.sendRequest.mockClear()
+
+        try {
+            upstream.triggerNotification('textDocument/didOpen', {
+                textDocument: {
+                    uri: 'file:///workspace/components/App.vue',
+                    languageId: 'vue',
+                    version: 1,
+                    text: '<template><div>{{ count }}</div></template>\n<script setup lang="ts">const count: string = 1</script>'
+                }
+            })
+            await vi.advanceTimersByTimeAsync(150)
+
+            expect(vtslsConn.sendRequest).toHaveBeenCalledWith('workspace/executeCommand', {
+                command: 'typescript.tsserverRequest',
+                arguments: [
+                    'geterr',
+                    {
+                        delay: 0,
+                        files: ['/workspace/components/App.vue']
+                    },
+                    {
+                        isAsync: true,
+                        lowPriority: true
+                    }
+                ]
+            })
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
+    it('returns pull diagnostics from vtsls tsserver requests', async () => {
+        vtslsConn.sendRequest.mockImplementation(async (method: string, params?: unknown) => {
+            if (method === 'initialize') return { capabilities: {} }
+            if (method === 'workspace/executeCommand') {
+                const command = (params as { arguments?: unknown[] }).arguments?.[0]
+                if (command === 'semanticDiagnosticsSync') {
+                    return {
+                        body: [
+                            {
+                                start: { line: 2, offset: 7 },
+                                end: { line: 2, offset: 12 },
+                                text: "Type 'number' is not assignable to type 'string'.",
+                                code: 2322,
+                                category: 'error'
+                            }
+                        ]
+                    }
+                }
+                return { body: [] }
+            }
+            return { capabilities: {} }
+        })
+        await upstream.triggerRequest('initialize', initParams)
+
+        const result = await upstream.triggerRequest('textDocument/diagnostic', {
+            textDocument: { uri: 'file:///workspace/components/App.vue' }
+        })
+
+        expect(result).toEqual({
+            kind: 'full',
+            items: [
+                {
+                    range: {
+                        start: { line: 1, character: 6 },
+                        end: { line: 1, character: 11 }
+                    },
+                    severity: 1,
+                    source: 'ts',
+                    message: "Type 'number' is not assignable to type 'string'.",
+                    code: 2322
+                }
+            ]
+        })
     })
 
     it('primes Vue project info on didOpen for .vue files after a short delay', async () => {

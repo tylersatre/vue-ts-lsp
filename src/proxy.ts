@@ -5,7 +5,14 @@ import type { CrashRecoveryOptions } from './proxy-types.js'
 import { createProxyContext } from './proxy-context.js'
 import { resolveVueTypescriptPluginLocation, buildVtslsInitParams, buildVueLsInitParams, buildVtslsSettings, buildVueLsSettings } from './proxy-utils.js'
 import { applyWorkspaceConfigFromInitParams } from './proxy-workspace.js'
-import { setupVtslsHandlers, setupVueLsHandlers, setupTsserverRequestHandler, setupDocumentLifecycleHandlers, forwardRequest } from './proxy-handlers.js'
+import {
+    setupVtslsHandlers,
+    setupVueLsHandlers,
+    setupTsserverRequestHandler,
+    setupDocumentLifecycleHandlers,
+    setupPullDiagnosticHandler,
+    forwardRequest
+} from './proxy-handlers.js'
 import { recoverVtsls, recoverVueLs, setupVtslsCrashRecovery, setupVueLsCrashRecovery } from './proxy-recovery.js'
 import type { DocumentStore } from './documents.js'
 import * as logger from './logger.js'
@@ -57,6 +64,7 @@ export function setupProxy(
     forwardRequest(ctx, 'textDocument/prepareCallHierarchy')
     forwardRequest(ctx, 'callHierarchy/incomingCalls')
     forwardRequest(ctx, 'callHierarchy/outgoingCalls')
+    setupPullDiagnosticHandler(ctx)
 
     // Initialize handler
     upstream.onRequest('initialize', async (params: InitializeParams) => {
@@ -90,7 +98,11 @@ export function setupProxy(
                 documentSymbolProvider: true,
                 referencesProvider: true,
                 workspaceSymbolProvider: true,
-                callHierarchyProvider: true
+                callHierarchyProvider: true,
+                diagnosticProvider: {
+                    interFileDependencies: true,
+                    workspaceDiagnostics: false
+                }
             }
         }
     })

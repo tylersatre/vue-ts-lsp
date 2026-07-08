@@ -1,7 +1,7 @@
 import type { MessageConnection } from 'vscode-jsonrpc/node'
 import type { ProxyContext } from './proxy-context.js'
 import type { ContentChange } from './proxy-types.js'
-import { isVueUri, isScriptLikeUri, summarizePayload, buildVtslsSettings, buildVueLsSettings, patchFullDocReplacements } from './proxy-utils.js'
+import { isVueUri, isScriptLikeUri, summarizePayload, buildVtslsSettings, buildVueLsSettings, patchFullDocReplacements, uriToFilePath } from './proxy-utils.js'
 import {
     sendDownstreamRequest,
     buildTsserverRequestCommand,
@@ -169,6 +169,7 @@ export function setupDocumentLifecycleHandlers(ctx: ProxyContext): void {
         ctx.currentVtsls.sendNotification('textDocument/didOpen', params)
         if (isVueUri(uri)) {
             ctx.currentVueLs.sendNotification('textDocument/didOpen', params)
+            scheduleVueDiagnosticsNudge(ctx, uri)
         }
         maybePrimeDocument(ctx, uri)
     })
@@ -283,4 +284,140 @@ export function forwardRequest(ctx: ProxyContext, method: string): void {
             throw err
         }
     })
+}
+
+export function setupPullDiagnosticHandler(ctx: ProxyContext): void {
+    ctx.upstream.onRequest('textDocument/diagnostic', async (params: unknown) => {
+        const uri = extractDiagnosticUri(params)
+        if (uri === null || (!isVueUri(uri) && !isScriptLikeUri(uri))) {
+            return { kind: 'full', items: [] }
+        }
+
+        const file = uriToFilePath(uri)
+        if (file === null) {
+            return { kind: 'full', items: [] }
+        }
+
+        const [syntactic, semantic] = await Promise.all([
+            requestTsserverDiagnostics(ctx, 'syntacticDiagnosticsSync', file),
+            requestTsserverDiagnostics(ctx, 'semanticDiagnosticsSync', file)
+        ])
+        const items = dedupeDiagnostics([...syntactic, ...semantic])
+        if (isVueUri(uri)) {
+            ctx.lastVtslsDiagnosticsAt.set(uri, Date.now())
+            ctx.diagnosticsStore.update(uri, 'vtsls', items)
+        }
+        return { kind: 'full', items }
+    })
+}
+
+function extractDiagnosticUri(params: unknown): string | null {
+    if (params === null || typeof params !== 'object' || !('textDocument' in params)) {
+        return null
+    }
+    const textDocument = (params as { textDocument?: unknown }).textDocument
+    if (textDocument === null || typeof textDocument !== 'object' || !('uri' in textDocument)) {
+        return null
+    }
+    const uri = (textDocument as { uri?: unknown }).uri
+    return typeof uri === 'string' ? uri : null
+}
+
+async function requestTsserverDiagnostics(ctx: ProxyContext, command: string, file: string): Promise<Diagnostic[]> {
+    try {
+        const response = await sendDownstreamRequest(ctx, 'vtsls', 'workspace/executeCommand', buildTsserverRequestCommand(command, { file }))
+        const body =
+            response !== null && response !== undefined && typeof response === 'object' && 'body' in response
+                ? (response as { body?: unknown }).body
+                : undefined
+        if (!Array.isArray(body)) {
+            return []
+        }
+        return body.flatMap((diagnostic) => normalizeTsserverDiagnostic(diagnostic))
+    } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err)
+        logger.warn('proxy', `textDocument/diagnostic ${command} file=${file} ERROR: ${msg}`)
+        return []
+    }
+}
+
+function normalizeTsserverDiagnostic(value: unknown): Diagnostic[] {
+    if (value === null || typeof value !== 'object') {
+        return []
+    }
+    const diagnostic = value as {
+        start?: { line?: unknown; offset?: unknown }
+        end?: { line?: unknown; offset?: unknown }
+        text?: unknown
+        messageText?: unknown
+        code?: unknown
+        category?: unknown
+    }
+    if (
+        typeof diagnostic.start?.line !== 'number' ||
+        typeof diagnostic.start.offset !== 'number' ||
+        typeof diagnostic.end?.line !== 'number' ||
+        typeof diagnostic.end.offset !== 'number'
+    ) {
+        return []
+    }
+    const message = diagnosticMessage(diagnostic.text ?? diagnostic.messageText)
+    if (message.length === 0) {
+        return []
+    }
+    const result: Diagnostic = {
+        range: {
+            start: { line: Math.max(0, diagnostic.start.line - 1), character: Math.max(0, diagnostic.start.offset - 1) },
+            end: { line: Math.max(0, diagnostic.end.line - 1), character: Math.max(0, diagnostic.end.offset - 1) }
+        },
+        severity: diagnosticSeverity(diagnostic.category),
+        source: 'ts',
+        message
+    }
+    if (typeof diagnostic.code === 'number' || typeof diagnostic.code === 'string') {
+        result.code = diagnostic.code
+    }
+    return [result]
+}
+
+function diagnosticMessage(value: unknown): string {
+    if (typeof value === 'string') {
+        return value.replace(/\s+/g, ' ').trim()
+    }
+    if (value !== null && typeof value === 'object' && 'messageText' in value) {
+        return diagnosticMessage((value as { messageText?: unknown }).messageText)
+    }
+    return ''
+}
+
+function diagnosticSeverity(category: unknown): 1 | 2 | 3 | 4 {
+    switch (category) {
+        case 'error':
+        case 1:
+            return 1
+        case 'warning':
+        case 0:
+            return 2
+        case 'suggestion':
+        case 2:
+            return 3
+        case 'message':
+        case 3:
+            return 4
+        default:
+            return 1
+    }
+}
+
+function dedupeDiagnostics(diagnostics: Diagnostic[]): Diagnostic[] {
+    const seen = new Set<string>()
+    const result: Diagnostic[] = []
+    for (const diagnostic of diagnostics) {
+        const key = `${diagnostic.range.start.line}:${diagnostic.range.start.character}:${diagnostic.range.end.line}:${diagnostic.range.end.character}:${diagnostic.message}`
+        if (!seen.has(key)) {
+            seen.add(key)
+            result.push(diagnostic)
+        }
+    }
+    return result
 }

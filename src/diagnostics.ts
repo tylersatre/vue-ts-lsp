@@ -11,6 +11,9 @@ export interface DiagnosticRange {
 export interface Diagnostic {
     range: DiagnosticRange
     message: string
+    severity?: 1 | 2 | 3 | 4
+    source?: string
+    code?: string | number
 }
 
 export type ServerKey = 'vtsls' | 'vue_ls'
