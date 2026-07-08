@@ -1,6 +1,6 @@
 {
     "name": "vue-ts-lsp",
-    "version": "0.2.1",
+    "version": "0.3.0",
     "description": "Unified Vue + TypeScript LSP for Claude Code — go-to-definition, hover, references, symbols, call hierarchy, and diagnostics across .vue and .ts files, including <template> expressions",
     "author": {
         "name": "Tyler Satre",
@@ -9,5 +9,10 @@
     "homepage": "https://github.com/tylersatre/vue-ts-lsp",
     "repository": "https://github.com/tylersatre/vue-ts-lsp",
     "license": "MIT",
-    "keywords": ["lsp", "vue", "typescript", "language-server"]
+    "keywords": [
+        "lsp",
+        "vue",
+        "typescript",
+        "language-server"
+    ]
 }
