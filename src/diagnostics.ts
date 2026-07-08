@@ -32,6 +32,17 @@ export class DiagnosticsStore {
         return this.merge(uri)
     }
 
+    remove(uri: string): void {
+        this.store.delete(uri)
+    }
+
+    /** Drops one server's entries everywhere — its knowledge is stale after a crash restart. */
+    clearServer(server: ServerKey): void {
+        for (const diagnosticsByServer of this.store.values()) {
+            diagnosticsByServer.delete(server)
+        }
+    }
+
     private merge(uri: string): Diagnostic[] {
         const diagnosticsByServer = this.store.get(uri)
         if (diagnosticsByServer === undefined) return []

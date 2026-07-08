@@ -55,7 +55,7 @@ The plugin tells Claude Code to use `vue-ts-lsp` for Vue and TypeScript files.
 claude plugin install vue-ts-lsp@vue-ts-lsp
 ```
 
-**Manually** — create an `.lsp.json` file at the root of your project or in a [plugin directory](https://code.claude.com/docs/en/plugins) loaded via `claude --plugin-dir`:
+**Manually** — create an `.lsp.json` file in a [plugin directory](https://code.claude.com/docs/en/plugins) loaded via `claude --plugin-dir` (Claude Code discovers LSP servers through plugins only — an `.lsp.json` at your project root is not picked up):
 
 ```json
 {
@@ -73,7 +73,17 @@ claude plugin install vue-ts-lsp@vue-ts-lsp
 }
 ```
 
-> **Note:** This proxy replaces separate vtsls and vue-volar plugins. Do not install them simultaneously — you'll get duplicate diagnostics.
+Claude Code also accepts these optional fields in `.lsp.json` (as of Claude Code 2.1.204):
+
+| Field         | Type       | Default | Description                                                                                 |
+| ------------- | ---------- | ------- | ------------------------------------------------------------------------------------------- |
+| `args`        | `string[]` | `[]`    | Extra CLI arguments — e.g. `["--log-level=debug"]` to enable proxy debug logging            |
+| `diagnostics` | `boolean`  | `true`  | Set `false` to keep code navigation but suppress automatic diagnostic injection after edits |
+| `maxRestarts` | `number`   | `3`     | Crash-recovery attempts for the proxy process before Claude Code gives up                   |
+
+> **Warning:** Do not add `restartOnCrash` or `shutdownTimeout` — Claude Code 2.1.204 recognizes but rejects them ("not yet implemented"), and the server will fail to start.
+
+> **Note:** This proxy replaces separate vtsls and vue-volar plugins. Do not enable them simultaneously: Claude Code assigns each file extension to the first plugin that claims it, so a competing TypeScript plugin (e.g. `typescript-lsp`) can capture `.ts`/`.tsx` files while this proxy serves `.vue` — splitting the two sides of cross-file navigation across unrelated servers.
 
 ### 3. Verify
 
@@ -147,7 +157,7 @@ Notes:
 
 ## Known limitations
 
-- Same-file diagnostics are generally reliable, but Claude Code may occasionally fail to attach a diagnostic to the current edit even when the proxy already published it.
+- Same-file diagnostics are reliable. Forwarded diagnostics now carry the document version they were computed against, so Claude Code drops pre-edit stragglers instead of attributing them to the current edit; a diagnostic can still land one turn late if the type check outruns Claude Code's read of it.
 - Cross-file diagnostics after changing exported function signatures, store APIs, or narrowed unions are improved but not guaranteed to appear immediately in every dependent file, especially in large mixed workspaces.
 - If your workflow depends on catching downstream breakage after API changes, do not treat "no diagnostic appeared" as proof that all callers are valid. Prefer `findReferences`, a targeted typecheck, or project-specific verification hooks for high-confidence changes.
 - Go-to-definition can be sensitive to the exact character position in complex TypeScript expressions such as `keyof typeof ...`. If a lookup misses unexpectedly, retry with the cursor placed directly on the referenced symbol.

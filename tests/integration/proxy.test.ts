@@ -521,6 +521,63 @@ describe('document synchronization forwarding', () => {
         })
     })
 
+    it('merges stored vue_ls diagnostics into pull diagnostics for .vue documents', async () => {
+        const tsserverItem = {
+            range: {
+                start: { line: 1, character: 6 },
+                end: { line: 1, character: 11 }
+            },
+            severity: 1,
+            source: 'ts',
+            message: "Type 'number' is not assignable to type 'string'.",
+            code: 2322
+        }
+        const vueLsDiag = {
+            range: {
+                start: { line: 3, character: 0 },
+                end: { line: 3, character: 4 }
+            },
+            severity: 2,
+            source: 'vue',
+            message: 'Vue-specific warning'
+        }
+        vtslsConn.sendRequest.mockImplementation(async (method: string, params?: unknown) => {
+            if (method === 'initialize') return { capabilities: {} }
+            if (method === 'workspace/executeCommand') {
+                const command = (params as { arguments?: unknown[] }).arguments?.[0]
+                if (command === 'semanticDiagnosticsSync') {
+                    return {
+                        body: [
+                            {
+                                start: { line: 2, offset: 7 },
+                                end: { line: 2, offset: 12 },
+                                text: "Type 'number' is not assignable to type 'string'.",
+                                code: 2322,
+                                category: 'error'
+                            }
+                        ]
+                    }
+                }
+                return { body: [] }
+            }
+            return { capabilities: {} }
+        })
+        await upstream.triggerRequest('initialize', initParams)
+
+        vueLsConn.triggerNotification('textDocument/publishDiagnostics', {
+            uri: 'file:///workspace/components/App.vue',
+            diagnostics: [vueLsDiag]
+        })
+
+        const result = (await upstream.triggerRequest('textDocument/diagnostic', {
+            textDocument: { uri: 'file:///workspace/components/App.vue' }
+        })) as { kind: string; items: unknown[] }
+
+        expect(result.kind).toBe('full')
+        expect(result.items).toEqual(expect.arrayContaining([tsserverItem, vueLsDiag]))
+        expect(result.items).toHaveLength(2)
+    })
+
     it('primes Vue project info on didOpen for .vue files after a short delay', async () => {
         vi.useFakeTimers()
         await upstream.triggerRequest('initialize', initParams)
@@ -554,9 +611,18 @@ describe('document synchronization forwarding', () => {
     })
 
     it('forwards didChange for .ts file to vtsls only', () => {
+        upstream.triggerNotification('textDocument/didOpen', {
+            textDocument: { uri: 'file:///foo.ts', languageId: 'typescript', version: 1, text: 'const x = 1;' }
+        })
+        vtslsConn.sendNotification.mockClear()
         const params = {
             textDocument: { uri: 'file:///foo.ts', version: 2 },
-            contentChanges: [{ text: 'const x = 2;' }]
+            contentChanges: [
+                {
+                    range: { start: { line: 0, character: 10 }, end: { line: 0, character: 11 } },
+                    text: '2'
+                }
+            ]
         }
         upstream.triggerNotification('textDocument/didChange', params)
         expect(vtslsConn.sendNotification).toHaveBeenCalledWith('textDocument/didChange', params)
@@ -564,9 +630,19 @@ describe('document synchronization forwarding', () => {
     })
 
     it('forwards didChange for .vue file to both servers', () => {
+        upstream.triggerNotification('textDocument/didOpen', {
+            textDocument: { uri: 'file:///App.vue', languageId: 'vue', version: 1, text: '<template><span/></template>' }
+        })
+        vtslsConn.sendNotification.mockClear()
+        vueLsConn.sendNotification.mockClear()
         const params = {
             textDocument: { uri: 'file:///App.vue', version: 2 },
-            contentChanges: [{ text: '<template><div/></template>' }]
+            contentChanges: [
+                {
+                    range: { start: { line: 0, character: 11 }, end: { line: 0, character: 15 } },
+                    text: 'div/'
+                }
+            ]
         }
         upstream.triggerNotification('textDocument/didChange', params)
         expect(vtslsConn.sendNotification).toHaveBeenCalledWith('textDocument/didChange', params)
@@ -1516,6 +1592,119 @@ describe('document synchronization forwarding', () => {
         expect(upstream.sendNotification).toHaveBeenCalledWith('textDocument/publishDiagnostics', params)
     })
 
+    it('stamps forwarded vtsls diagnostics with the open document version', () => {
+        upstream.triggerNotification('textDocument/didOpen', {
+            textDocument: { uri: 'file:///foo.ts', languageId: 'typescript', version: 1, text: 'const x = 1;' }
+        })
+        upstream.triggerNotification('textDocument/didChange', {
+            textDocument: { uri: 'file:///foo.ts', version: 4 },
+            contentChanges: [{ text: 'const x: string = 1;' }]
+        })
+        upstream.sendNotification.mockClear()
+
+        vtslsConn.triggerNotification('textDocument/publishDiagnostics', {
+            uri: 'file:///foo.ts',
+            diagnostics: [
+                {
+                    range: { start: { line: 0, character: 6 }, end: { line: 0, character: 7 } },
+                    message: 'Type error'
+                }
+            ]
+        })
+
+        const publish = upstream.sendNotification.mock.calls.find(([method]) => method === 'textDocument/publishDiagnostics')
+        expect(publish).toBeDefined()
+        expect((publish![1] as { version?: number }).version).toBe(4)
+    })
+
+    it('preserves a downstream-provided version when the document is not open', () => {
+        vueLsConn.triggerNotification('textDocument/publishDiagnostics', {
+            uri: 'file:///App.vue',
+            diagnostics: [],
+            version: 7
+        })
+
+        const publish = upstream.sendNotification.mock.calls.find(([method]) => method === 'textDocument/publishDiagnostics')
+        expect(publish).toBeDefined()
+        expect((publish![1] as { version?: number }).version).toBe(7)
+    })
+
+    it('prefers the downstream version over the document store version', () => {
+        upstream.triggerNotification('textDocument/didOpen', {
+            textDocument: { uri: 'file:///App.vue', languageId: 'vue', version: 5, text: '<template><div/></template>' }
+        })
+        upstream.sendNotification.mockClear()
+
+        // vue_ls reports the version it actually diagnosed (an in-flight pre-edit publish)
+        vueLsConn.triggerNotification('textDocument/publishDiagnostics', {
+            uri: 'file:///App.vue',
+            diagnostics: [],
+            version: 4
+        })
+
+        const publish = upstream.sendNotification.mock.calls.find(([method]) => method === 'textDocument/publishDiagnostics')
+        expect(publish).toBeDefined()
+        expect((publish![1] as { version?: number }).version).toBe(4)
+    })
+
+    it('stamps merged .vue diagnostics with the store version when downstream omits it', () => {
+        upstream.triggerNotification('textDocument/didOpen', {
+            textDocument: { uri: 'file:///App.vue', languageId: 'vue', version: 2, text: '<template><div/></template>' }
+        })
+        upstream.sendNotification.mockClear()
+
+        // vtsls never includes a version in publishDiagnostics
+        vtslsConn.triggerNotification('textDocument/publishDiagnostics', {
+            uri: 'file:///App.vue',
+            diagnostics: [
+                {
+                    range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } },
+                    message: 'TS error'
+                }
+            ]
+        })
+
+        const publish = upstream.sendNotification.mock.calls.find(([method]) => method === 'textDocument/publishDiagnostics')
+        expect(publish).toBeDefined()
+        expect((publish![1] as { version?: number }).version).toBe(2)
+    })
+
+    it('omits version when the document is unknown and downstream sent none', () => {
+        vtslsConn.triggerNotification('textDocument/publishDiagnostics', {
+            uri: 'file:///never-opened.ts',
+            diagnostics: []
+        })
+
+        const publish = upstream.sendNotification.mock.calls.find(([method]) => method === 'textDocument/publishDiagnostics')
+        expect(publish).toBeDefined()
+        expect('version' in (publish![1] as Record<string, unknown>)).toBe(false)
+    })
+
+    it('drops stored diagnostics on didClose so a reopen does not blend stale entries', () => {
+        const staleVtslsDiag = {
+            range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } },
+            message: 'Stale TS error'
+        }
+        upstream.triggerNotification('textDocument/didOpen', {
+            textDocument: { uri: 'file:///App.vue', languageId: 'vue', version: 1, text: '<template/>' }
+        })
+        vtslsConn.triggerNotification('textDocument/publishDiagnostics', {
+            uri: 'file:///App.vue',
+            diagnostics: [staleVtslsDiag]
+        })
+        upstream.triggerNotification('textDocument/didClose', { textDocument: { uri: 'file:///App.vue' } })
+        upstream.sendNotification.mockClear()
+
+        vueLsConn.triggerNotification('textDocument/publishDiagnostics', {
+            uri: 'file:///App.vue',
+            diagnostics: []
+        })
+
+        const publish = upstream.sendNotification.mock.calls.find(([method]) => method === 'textDocument/publishDiagnostics')
+        expect(publish).toBeDefined()
+        expect((publish![1] as { diagnostics: unknown[] }).diagnostics).toEqual([])
+    })
+
     it('forwards rapid diagnostics updates for the same URI upstream in order', () => {
         const staleParams = {
             uri: 'file:///foo.ts',
@@ -1682,6 +1871,168 @@ describe('document synchronization forwarding', () => {
             textDocument: { uri: 'file:///foo.ts' }
         })
         expect(store.get('file:///foo.ts')).toBeUndefined()
+    })
+})
+
+describe('document lifecycle self-healing', () => {
+    let upstream: MockConnection
+    let vtslsConn: MockConnection
+    let vueLsConn: MockConnection
+    const initParams = {
+        rootUri: 'file:///workspace',
+        workspaceFolders: [{ uri: 'file:///workspace', name: 'workspace' }],
+        capabilities: {}
+    }
+
+    beforeEach(() => {
+        upstream = createMockConnection()
+        vtslsConn = createMockConnection()
+        vueLsConn = createMockConnection()
+
+        setupProxy(upstream as unknown as MessageConnection, vtslsConn as unknown as MessageConnection, vueLsConn as unknown as MessageConnection)
+    })
+
+    it('converts a full-text didChange for an unopened .ts document into didOpen', () => {
+        upstream.triggerNotification('textDocument/didChange', {
+            textDocument: { uri: 'file:///workspace/orphan.ts', version: 7 },
+            contentChanges: [{ text: 'const healed = true;' }]
+        })
+
+        expect(vtslsConn.sendNotification).toHaveBeenCalledWith('textDocument/didOpen', {
+            textDocument: {
+                uri: 'file:///workspace/orphan.ts',
+                languageId: 'typescript',
+                version: 7,
+                text: 'const healed = true;'
+            }
+        })
+        expect(vtslsConn.sendNotification).not.toHaveBeenCalledWith('textDocument/didChange', expect.anything())
+        expect(vueLsConn.sendNotification).not.toHaveBeenCalledWith('textDocument/didOpen', expect.anything())
+    })
+
+    it('converts a full-text didChange for an unopened .vue document into didOpen on both servers', () => {
+        upstream.triggerNotification('textDocument/didChange', {
+            textDocument: { uri: 'file:///workspace/Orphan.vue', version: 3 },
+            contentChanges: [{ text: '<template><div/></template>' }]
+        })
+
+        const expected = {
+            textDocument: {
+                uri: 'file:///workspace/Orphan.vue',
+                languageId: 'vue',
+                version: 3,
+                text: '<template><div/></template>'
+            }
+        }
+        expect(vtslsConn.sendNotification).toHaveBeenCalledWith('textDocument/didOpen', expected)
+        expect(vueLsConn.sendNotification).toHaveBeenCalledWith('textDocument/didOpen', expected)
+        expect(vtslsConn.sendNotification).not.toHaveBeenCalledWith('textDocument/didChange', expect.anything())
+    })
+
+    it('tracks the healed document so later didChanges apply normally', () => {
+        upstream.triggerNotification('textDocument/didChange', {
+            textDocument: { uri: 'file:///workspace/orphan.ts', version: 7 },
+            contentChanges: [{ text: 'const healed = true;' }]
+        })
+        vtslsConn.sendNotification.mockClear()
+
+        upstream.triggerNotification('textDocument/didChange', {
+            textDocument: { uri: 'file:///workspace/orphan.ts', version: 8 },
+            contentChanges: [{ text: 'const healed = false;' }]
+        })
+
+        const didChangeCall = vtslsConn.sendNotification.mock.calls.find(([method]) => method === 'textDocument/didChange')
+        expect(didChangeCall).toBeDefined()
+        const forwarded = didChangeCall![1] as { contentChanges: Array<{ range?: unknown; text: string }> }
+        expect(forwarded.contentChanges[0]!.text).toBe('const healed = false;')
+        expect(forwarded.contentChanges[0]!.range).toEqual({
+            start: { line: 0, character: 0 },
+            end: { line: 0, character: 20 }
+        })
+    })
+
+    it('leaves ranged didChanges for unopened documents untouched', () => {
+        const params = {
+            textDocument: { uri: 'file:///workspace/orphan.ts', version: 2 },
+            contentChanges: [
+                {
+                    range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+                    text: 'x'
+                }
+            ]
+        }
+        upstream.triggerNotification('textDocument/didChange', params)
+
+        expect(vtslsConn.sendNotification).toHaveBeenCalledWith('textDocument/didChange', params)
+        expect(vtslsConn.sendNotification).not.toHaveBeenCalledWith('textDocument/didOpen', expect.anything())
+    })
+
+    it('forwards didOpen for an already-open document as a ranged full-document didChange', () => {
+        upstream.triggerNotification('textDocument/didOpen', {
+            textDocument: { uri: 'file:///workspace/App.vue', languageId: 'vue', version: 1, text: 'old content' }
+        })
+        vtslsConn.sendNotification.mockClear()
+        vueLsConn.sendNotification.mockClear()
+
+        upstream.triggerNotification('textDocument/didOpen', {
+            textDocument: { uri: 'file:///workspace/App.vue', languageId: 'vue', version: 1, text: 'new content' }
+        })
+
+        // The synthesized didChange re-uses the incoming didOpen version so child-server
+        // numbering realigns with the client's counter from here on.
+        const expectedChange = {
+            textDocument: { uri: 'file:///workspace/App.vue', version: 1 },
+            contentChanges: [
+                {
+                    range: { start: { line: 0, character: 0 }, end: { line: 0, character: 11 } },
+                    text: 'new content'
+                }
+            ]
+        }
+        expect(vtslsConn.sendNotification).toHaveBeenCalledWith('textDocument/didChange', expectedChange)
+        expect(vueLsConn.sendNotification).toHaveBeenCalledWith('textDocument/didChange', expectedChange)
+        expect(vtslsConn.sendNotification).not.toHaveBeenCalledWith('textDocument/didOpen', expect.anything())
+        expect(vueLsConn.sendNotification).not.toHaveBeenCalledWith('textDocument/didOpen', expect.anything())
+    })
+
+    it('opens an on-disk document before forwarding a request for it', async () => {
+        const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'self-heal-'))
+        const filePath = path.join(workDir, 'orphan.ts')
+        fs.writeFileSync(filePath, 'export const fromDisk = 1;')
+        const uri = pathToFileURL(filePath).href
+        try {
+            vtslsConn.sendRequest.mockResolvedValue({ contents: 'hover' })
+
+            await upstream.triggerRequest('textDocument/hover', {
+                textDocument: { uri },
+                position: { line: 0, character: 14 }
+            })
+
+            expect(vtslsConn.sendNotification).toHaveBeenCalledWith('textDocument/didOpen', {
+                textDocument: {
+                    uri,
+                    languageId: 'typescript',
+                    version: 1,
+                    text: 'export const fromDisk = 1;'
+                }
+            })
+            const openIndex = vtslsConn.sendNotification.mock.calls.findIndex(([method]) => method === 'textDocument/didOpen')
+            const hoverIndex = vtslsConn.sendRequest.mock.calls.findIndex(([method]) => method === 'textDocument/hover')
+            expect(openIndex).toBeGreaterThanOrEqual(0)
+            expect(hoverIndex).toBeGreaterThanOrEqual(0)
+            expect(vtslsConn.sendNotification.mock.invocationCallOrder[openIndex]!).toBeLessThan(vtslsConn.sendRequest.mock.invocationCallOrder[hoverIndex]!)
+        } finally {
+            fs.rmSync(workDir, { recursive: true, force: true })
+        }
+    })
+
+    it('does not synthesize didOpen for requests on files missing from disk', async () => {
+        await upstream.triggerRequest('textDocument/hover', {
+            textDocument: { uri: 'file:///definitely/not/on/disk.ts' },
+            position: { line: 0, character: 0 }
+        })
+
+        expect(vtslsConn.sendNotification).not.toHaveBeenCalledWith('textDocument/didOpen', expect.anything())
     })
 })
 
@@ -2935,6 +3286,76 @@ describe('crash recovery', () => {
         const initCall = (newVtsls.sendRequest.mock.calls as [string, unknown][]).find(([method]) => method === 'initialize')
         expect(initCall).toBeDefined()
         expect(initCall![1]).toMatchObject({ rootUri: 'file:///workspace' })
+    })
+
+    it('clears stored vtsls diagnostics on recovery so merges do not blend pre-crash entries', async () => {
+        const upstream = createMockConnection()
+        const vtslsConn = createMockConnection()
+        const vueLsConn = createMockConnection()
+        const newVtsls = createMockConnection()
+
+        await initProxy(upstream, vtslsConn, vueLsConn, () => newVtsls)
+
+        upstream.triggerNotification('textDocument/didOpen', {
+            textDocument: { uri: 'file:///App.vue', languageId: 'vue', version: 1, text: '<template/>' }
+        })
+        vtslsConn.triggerNotification('textDocument/publishDiagnostics', {
+            uri: 'file:///App.vue',
+            diagnostics: [
+                {
+                    range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } },
+                    message: 'Pre-crash TS error'
+                }
+            ]
+        })
+
+        vtslsConn.triggerClose()
+        await flushRecovery()
+
+        upstream.sendNotification.mockClear()
+        vueLsConn.triggerNotification('textDocument/publishDiagnostics', {
+            uri: 'file:///App.vue',
+            diagnostics: []
+        })
+
+        const publish = upstream.sendNotification.mock.calls.find(([method]) => method === 'textDocument/publishDiagnostics')
+        expect(publish).toBeDefined()
+        expect((publish![1] as { diagnostics: unknown[] }).diagnostics).toEqual([])
+    })
+
+    it('clears stored vue_ls diagnostics on recovery so merges do not blend pre-crash entries', async () => {
+        const upstream = createMockConnection()
+        const vtslsConn = createMockConnection()
+        const vueLsConn = createMockConnection()
+        const newVueLs = createMockConnection()
+
+        await initProxy(upstream, vtslsConn, vueLsConn, undefined, () => newVueLs)
+
+        upstream.triggerNotification('textDocument/didOpen', {
+            textDocument: { uri: 'file:///App.vue', languageId: 'vue', version: 1, text: '<template/>' }
+        })
+        vueLsConn.triggerNotification('textDocument/publishDiagnostics', {
+            uri: 'file:///App.vue',
+            diagnostics: [
+                {
+                    range: { start: { line: 1, character: 0 }, end: { line: 1, character: 5 } },
+                    message: 'Pre-crash Vue error'
+                }
+            ]
+        })
+
+        vueLsConn.triggerClose()
+        await flushRecovery()
+
+        upstream.sendNotification.mockClear()
+        vtslsConn.triggerNotification('textDocument/publishDiagnostics', {
+            uri: 'file:///App.vue',
+            diagnostics: []
+        })
+
+        const publish = upstream.sendNotification.mock.calls.find(([method]) => method === 'textDocument/publishDiagnostics')
+        expect(publish).toBeDefined()
+        expect((publish![1] as { diagnostics: unknown[] }).diagnostics).toEqual([])
     })
 
     it('replays all open documents to restarted vtsls', async () => {
@@ -5274,7 +5695,7 @@ describe('didChange full-document replacement patching', () => {
         expect(logger.debug).toHaveBeenCalledWith('proxy', expect.stringContaining('patched full-doc replacement'))
     })
 
-    it('forwards unknown-URI didChange notifications without patching', () => {
+    it('converts unknown-URI full-text didChange into a synthesized didOpen', () => {
         const params = {
             textDocument: { uri: 'file:///unknown.ts', version: 1 },
             contentChanges: [{ text: 'const x = 1;' }]
@@ -5283,7 +5704,9 @@ describe('didChange full-document replacement patching', () => {
             upstream.triggerNotification('textDocument/didChange', params)
         }).not.toThrow()
 
-        expect(vtslsConn.sendNotification).toHaveBeenCalledWith('textDocument/didChange', params)
+        expect(vtslsConn.sendNotification).toHaveBeenCalledWith('textDocument/didOpen', {
+            textDocument: { uri: 'file:///unknown.ts', languageId: 'typescript', version: 1, text: 'const x = 1;' }
+        })
     })
 
     it('uses the original content bounds when a file shrinks', () => {

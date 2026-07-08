@@ -1,7 +1,18 @@
+import fs from 'node:fs'
 import type { MessageConnection } from 'vscode-jsonrpc/node'
 import type { ProxyContext } from './proxy-context.js'
 import type { ContentChange } from './proxy-types.js'
-import { isVueUri, isScriptLikeUri, summarizePayload, buildVtslsSettings, buildVueLsSettings, patchFullDocReplacements, uriToFilePath } from './proxy-utils.js'
+import { computeDocumentEnd } from './documents.js'
+import {
+    isVueUri,
+    isScriptLikeUri,
+    languageIdForUri,
+    summarizePayload,
+    buildVtslsSettings,
+    buildVueLsSettings,
+    patchFullDocReplacements,
+    uriToFilePath
+} from './proxy-utils.js'
 import {
     sendDownstreamRequest,
     buildTsserverRequestCommand,
@@ -13,6 +24,7 @@ import {
 import { getDocumentText } from './proxy-workspace.js'
 import {
     forwardDiagnosticsUpstream,
+    resolveDiagnosticsVersion,
     scheduleVueDiagnosticsNudge,
     scheduleScriptDiagnosticsNudge,
     scheduleScriptDependentDiagnosticsNudge,
@@ -27,6 +39,7 @@ import { requestWithWorkspaceSymbolFallback, buildWorkspaceSymbolParams, remembe
 import { requestWithPrepareCallHierarchyFallback, requestWithCallHierarchyFallback } from './proxy-call-hierarchy.js'
 import { extractRequestUri } from './helpers/identifiers.js'
 import { isInternalProbeUri } from './helpers/probes.js'
+import { isDefinitionMirrorUri } from './definition-mirrors.js'
 import { normalizeDocumentSymbolKinds } from './helpers/symbols.js'
 import { extractTsserverRequestId, parseTsserverRequest, summarizeBridgeResponseBody } from './helpers/tsserver.js'
 import { routeRequest } from './router.js'
@@ -35,19 +48,20 @@ import * as logger from './logger.js'
 
 export function setupVtslsHandlers(ctx: ProxyContext, conn: MessageConnection): void {
     conn.onNotification('textDocument/publishDiagnostics', (params: unknown) => {
-        const p = params as { uri: string; diagnostics: Diagnostic[] }
+        const p = params as { uri: string; diagnostics: Diagnostic[]; version?: unknown }
         if (isInternalProbeUri(p.uri)) {
             logger.debug('proxy', `publishDiagnostics ignored internal probe uri=${p.uri} count=${p.diagnostics.length}`)
             return
         }
         ctx.lastVtslsDiagnosticsAt.set(p.uri, Date.now())
+        const version = resolveDiagnosticsVersion(ctx, p.uri, p.version)
         if (isVueUri(p.uri)) {
             const merged = ctx.diagnosticsStore.update(p.uri, 'vtsls', p.diagnostics)
             logDiagnostics('vtsls', p.uri, p.diagnostics.length, merged.length)
-            forwardDiagnosticsUpstream(ctx, p.uri, merged)
+            forwardDiagnosticsUpstream(ctx, p.uri, merged, version)
         } else {
             logDiagnostics('vtsls', p.uri, p.diagnostics.length)
-            forwardDiagnosticsUpstream(ctx, p.uri, p.diagnostics)
+            forwardDiagnosticsUpstream(ctx, p.uri, p.diagnostics, version)
         }
     })
     conn.onNotification('window/logMessage', (params: unknown) => {
@@ -63,18 +77,19 @@ export function setupVtslsHandlers(ctx: ProxyContext, conn: MessageConnection): 
 
 export function setupVueLsHandlers(ctx: ProxyContext, conn: MessageConnection): void {
     conn.onNotification('textDocument/publishDiagnostics', (params: unknown) => {
-        const p = params as { uri: string; diagnostics: Diagnostic[] }
+        const p = params as { uri: string; diagnostics: Diagnostic[]; version?: unknown }
         if (isInternalProbeUri(p.uri)) {
             logger.debug('proxy', `publishDiagnostics ignored internal probe uri=${p.uri} count=${p.diagnostics.length}`)
             return
         }
+        const version = resolveDiagnosticsVersion(ctx, p.uri, p.version)
         if (isVueUri(p.uri)) {
             const merged = ctx.diagnosticsStore.update(p.uri, 'vue_ls', p.diagnostics)
             logDiagnostics('vue_ls', p.uri, p.diagnostics.length, merged.length)
-            forwardDiagnosticsUpstream(ctx, p.uri, merged)
+            forwardDiagnosticsUpstream(ctx, p.uri, merged, version)
         } else {
             logDiagnostics('vue_ls', p.uri, p.diagnostics.length)
-            forwardDiagnosticsUpstream(ctx, p.uri, p.diagnostics)
+            forwardDiagnosticsUpstream(ctx, p.uri, p.diagnostics, version)
         }
     })
     conn.onNotification('window/logMessage', (params: unknown) => {
@@ -151,6 +166,63 @@ export function setupTsserverRequestHandler(ctx: ProxyContext, conn: MessageConn
     })
 }
 
+/** Sends didOpen to the servers responsible for the document and records it in the store. */
+export function openDocumentOnServers(ctx: ProxyContext, uri: string, languageId: string, version: number, text: string): void {
+    ctx.documentStore.open(uri, languageId, version, text)
+    const params = { textDocument: { uri, languageId, version, text } }
+    ctx.currentVtsls.sendNotification('textDocument/didOpen', params)
+    if (isVueUri(uri)) {
+        ctx.currentVueLs.sendNotification('textDocument/didOpen', params)
+        scheduleVueDiagnosticsNudge(ctx, uri)
+    }
+    maybePrimeDocument(ctx, uri)
+}
+
+/** Claude Code sends a single rangeless full-document change; anything else is not healable. */
+function extractFullTextChange(changes: ContentChange[]): string | null {
+    if (changes.length === 0) {
+        return null
+    }
+    const last = changes[changes.length - 1]!
+    return last.range === undefined ? last.text : null
+}
+
+// Matches the 10MB cap Claude Code applies when it reads a file for didOpen.
+const MAX_SELF_HEAL_DOCUMENT_BYTES = 10_000_000
+
+/**
+ * Claude Code does not replay didOpen after it restarts a crashed LSP server — its
+ * open-file map survives the restart, so requests and didChange notifications arrive
+ * for documents the child servers have never seen. Recover by opening the document
+ * from disk (the client saves after every edit, so disk content is current).
+ */
+export function ensureRequestDocumentOpen(ctx: ProxyContext, uri: string | null): void {
+    if (uri === null || ctx.documentStore.get(uri) !== undefined) {
+        return
+    }
+    if (isInternalProbeUri(uri) || isDefinitionMirrorUri(uri) || !(isVueUri(uri) || isScriptLikeUri(uri))) {
+        return
+    }
+    const filePath = uriToFilePath(uri)
+    if (filePath === null) {
+        return
+    }
+
+    let text: string
+    try {
+        const stat = fs.statSync(filePath)
+        if (!stat.isFile() || stat.size > MAX_SELF_HEAL_DOCUMENT_BYTES) {
+            return
+        }
+        text = fs.readFileSync(filePath, 'utf8')
+    } catch {
+        return
+    }
+
+    logger.warn('proxy', `request for unopened document ${uri} — opening from disk (client restarted the proxy without replaying open files?)`)
+    openDocumentOnServers(ctx, uri, languageIdForUri(uri), 1, text)
+}
+
 export function setupDocumentLifecycleHandlers(ctx: ProxyContext): void {
     ctx.upstream.onNotification('textDocument/didOpen', (params: unknown) => {
         const didOpenParams = params as {
@@ -162,6 +234,33 @@ export function setupDocumentLifecycleHandlers(ctx: ProxyContext): void {
             }
         }
         const { uri, languageId, version, text } = didOpenParams.textDocument
+
+        const existing = ctx.documentStore.get(uri)
+        if (existing !== undefined) {
+            // The child servers already have this document open; a second didOpen is a
+            // protocol violation. Re-sync content as a full-document replacement instead,
+            // re-using the incoming version so numbering realigns with the client.
+            logger.warn('proxy', `textDocument/didOpen ${uri} for already-open document — forwarding as full-document didChange`)
+            const changeParams = {
+                textDocument: { uri, version },
+                contentChanges: [
+                    {
+                        range: { start: { line: 0, character: 0 }, end: computeDocumentEnd(existing.content) },
+                        text
+                    }
+                ]
+            }
+            ctx.documentStore.open(uri, languageId, version, text)
+            ctx.currentVtsls.sendNotification('textDocument/didChange', changeParams)
+            if (isVueUri(uri)) {
+                ctx.currentVueLs.sendNotification('textDocument/didChange', changeParams)
+                scheduleVueDiagnosticsNudge(ctx, uri)
+            } else if (isScriptLikeUri(uri)) {
+                scheduleScriptDiagnosticsNudge(ctx, uri)
+            }
+            return
+        }
+
         ctx.documentStore.open(uri, languageId, version, text)
         const target = isVueUri(uri) ? 'vtsls+vue_ls' : 'vtsls'
         logger.info('proxy', `textDocument/didOpen ${uri} → ${target}`)
@@ -181,6 +280,23 @@ export function setupDocumentLifecycleHandlers(ctx: ProxyContext): void {
         }
         const { uri, version } = didChangeParams.textDocument
         const documentBeforeChange = ctx.documentStore.get(uri)
+
+        if (documentBeforeChange === undefined) {
+            const fullText = extractFullTextChange(didChangeParams.contentChanges)
+            if (fullText !== null) {
+                // Claude Code does not replay didOpen after restarting the proxy, so the
+                // first edit after a restart arrives as didChange for a document the child
+                // servers never opened. The change carries the full text — open with it.
+                logger.warn('proxy', `textDocument/didChange ${uri} v${version} for unopened document — synthesizing didOpen`)
+                openDocumentOnServers(ctx, uri, languageIdForUri(uri), version, fullText)
+                if (!isVueUri(uri) && isScriptLikeUri(uri)) {
+                    scheduleScriptDiagnosticsNudge(ctx, uri)
+                    scheduleScriptDependentDiagnosticsNudge(ctx, uri, null, didChangeParams.contentChanges)
+                }
+                return
+            }
+            logger.warn('proxy', `textDocument/didChange ${uri} v${version} for unopened document with ranged changes — forwarding as-is`)
+        }
 
         let forwardedChangeParams: unknown = params
         if (documentBeforeChange !== undefined) {
@@ -211,6 +327,7 @@ export function setupDocumentLifecycleHandlers(ctx: ProxyContext): void {
         const didCloseParams = params as { textDocument: { uri: string } }
         const { uri } = didCloseParams.textDocument
         ctx.documentStore.close(uri)
+        ctx.diagnosticsStore.remove(uri)
         ctx.lastVtslsDiagnosticsAt.delete(uri)
         clearVueDiagnosticsNudge(ctx, uri)
         clearScriptDiagnosticsNudge(ctx, uri)
@@ -237,6 +354,7 @@ export function setupDocumentLifecycleHandlers(ctx: ProxyContext): void {
 export function forwardRequest(ctx: ProxyContext, method: string): void {
     ctx.upstream.onRequest(method, async (params: unknown) => {
         const requestUri = extractRequestUri(params)
+        ensureRequestDocumentOpen(ctx, requestUri)
         rememberPositionContext(ctx, requestUri, params)
         const forwardedParams = method === 'workspace/symbol' ? buildWorkspaceSymbolParams(ctx, params) : params
         const target = routeRequest(method, params)
@@ -305,7 +423,10 @@ export function setupPullDiagnosticHandler(ctx: ProxyContext): void {
         const items = dedupeDiagnostics([...syntactic, ...semantic])
         if (isVueUri(uri)) {
             ctx.lastVtslsDiagnosticsAt.set(uri, Date.now())
-            ctx.diagnosticsStore.update(uri, 'vtsls', items)
+            // The tsserver sync commands only cover the vtsls side; fold in the latest
+            // vue_ls push diagnostics so the pull response matches the merged push view.
+            const merged = ctx.diagnosticsStore.update(uri, 'vtsls', items)
+            return { kind: 'full', items: merged }
         }
         return { kind: 'full', items }
     })

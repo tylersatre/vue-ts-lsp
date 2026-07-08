@@ -35,6 +35,18 @@ The critical glue between the two servers. vue_ls sends `tsserver/request` → p
 - `.vue` files: `didOpen`/`didChange`/`didClose` go to BOTH servers. LSP requests are split — TS-related methods (definition, hover, references, etc.) go to vtsls; Vue-specific methods (completion, rename, etc.) go to vue_ls.
 - Non-`.vue` files: everything goes to vtsls only.
 
+### Client lifecycle self-healing
+
+Claude Code (2.1.204) never sends `didClose`, always sends **full-text** `didChange` (it ignores the advertised sync kind), and — critically — does **not** replay `didOpen` when it restarts a crashed proxy: its open-file map survives the restart, so didChange notifications and LSP requests arrive for documents the child servers never saw. The proxy self-heals all three mismatches:
+
+- `didChange` for an unopened document with a full-text change → synthesized `didOpen` downstream.
+- `didOpen` for an already-open document → forwarded as a ranged full-document `didChange` (a second didOpen is a protocol violation).
+- An LSP request for an unopened document → opened from disk first (Claude Code saves after every edit, so disk is current; 10MB cap).
+
+### Diagnostics versioning
+
+Forwarded `textDocument/publishDiagnostics` carry a `version`: the downstream server's reported version when present (vue_ls reports one, vtsls never does), else the document store's version at forward time. Claude Code drops publishes whose version is older than its tracked document version, which prevents pre-edit diagnostics from being attributed to the current edit. The `DiagnosticsStore` is cleared per-URI on `didClose` and per-server on crash recovery so merges never blend stale entries.
+
 ### Crash recovery
 
 The document store tracks all open files. On child server restart, open documents are replayed (all docs for vtsls, only `.vue` docs for vue_ls). Restarts are rate-limited by `RetryTracker` (max 3 in 30s).

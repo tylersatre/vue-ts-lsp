@@ -48,6 +48,10 @@ export async function recoverVtsls(ctx: ProxyContext, reason: string, setupHandl
             ctx.currentKillVtsls?.()
         }
 
+        // The dead server's stored diagnostics are stale; drop them so .vue merges
+        // don't blend pre-crash entries with the other server's fresh publishes.
+        ctx.diagnosticsStore.clearServer('vtsls')
+
         await new Promise<void>((resolve) => setTimeout(resolve, ctx.delayMs))
 
         const spawned = normalizeSpawnedConnection(ctx.crashOptions!.spawnVtsls!())
@@ -104,6 +108,8 @@ export async function recoverVueLs(ctx: ProxyContext, reason: string, setupHandl
         if (forceKill) {
             ctx.currentKillVueLs?.()
         }
+
+        ctx.diagnosticsStore.clearServer('vue_ls')
 
         await new Promise<void>((resolve) => setTimeout(resolve, ctx.delayMs))
 

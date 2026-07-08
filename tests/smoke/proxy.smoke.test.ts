@@ -62,7 +62,7 @@ const DEFINITION_MIRROR_ROOT = process.env.VUE_TS_LSP_DEFINITION_MIRROR_ROOT ?? 
 const smokeDescribe = smokeEnabled ? describe.sequential : describe.skip
 const diagnosticDescribe = smokeEnabled && RUN_DIAGNOSTIC_SMOKE ? describe.sequential : describe.skip
 
-type PublishDiagnosticsParams = { uri: string; diagnostics: unknown[] }
+type PublishDiagnosticsParams = { uri: string; diagnostics: unknown[]; version?: number }
 type SymbolLike = { name?: string; children?: unknown[] }
 type DefinitionLike = { uri?: string; targetUri?: string }
 type NamedCallHierarchy = { from?: { name?: string }; to?: { name?: string } }
@@ -1105,6 +1105,11 @@ smokeDescribe('proxy smoke tests with real child servers', () => {
             )
 
             expect(notifications.length).toBeGreaterThan(0)
+            // Claude Code uses the stamped version to drop pre-edit diagnostics; every
+            // publish for an open document must carry one.
+            for (const notification of notifications) {
+                expect(typeof notification.version).toBe('number')
+            }
         },
         SMOKE_TIMEOUT_MS
     )

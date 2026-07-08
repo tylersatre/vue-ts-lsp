@@ -24,11 +24,29 @@ import {
 import type { Diagnostic } from './diagnostics.js'
 import * as logger from './logger.js'
 
-export function forwardDiagnosticsUpstream(ctx: ProxyContext, uri: string, diagnostics: Diagnostic[]): void {
-    ctx.upstream.sendNotification('textDocument/publishDiagnostics', {
+export function forwardDiagnosticsUpstream(ctx: ProxyContext, uri: string, diagnostics: Diagnostic[], version?: number): void {
+    const params: { uri: string; diagnostics: Diagnostic[]; version?: number } = {
         uri,
         diagnostics: [...diagnostics]
-    })
+    }
+    if (version !== undefined) {
+        params.version = version
+    }
+    ctx.upstream.sendNotification('textDocument/publishDiagnostics', params)
+}
+
+/**
+ * Claude Code drops publishDiagnostics whose version is older than its tracked document
+ * version, so stamping an accurate version prevents pre-edit diagnostics from being
+ * attributed to the current edit. The downstream-reported version wins (it reflects the
+ * content actually diagnosed — vue_ls reports one, vtsls does not); otherwise fall back
+ * to the open document's version at forward time.
+ */
+export function resolveDiagnosticsVersion(ctx: ProxyContext, uri: string, downstreamVersion: unknown): number | undefined {
+    if (typeof downstreamVersion === 'number') {
+        return downstreamVersion
+    }
+    return ctx.documentStore.get(uri)?.version
 }
 
 export function clearDiagnosticsNudge(uri: string, pending: Map<string, ReturnType<typeof setTimeout>>): void {
