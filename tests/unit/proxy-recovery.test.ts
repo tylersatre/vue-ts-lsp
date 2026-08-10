@@ -250,6 +250,11 @@ describe('recoverVtsls', () => {
         await recoverVtsls(ctx, 'connection closed', () => {})
         expect(ctx.currentVtsls).toBe(recoveredConn)
 
+        // Let the 1ms sliding window forget the first recovery — on a fast machine
+        // both recoveries can otherwise land in the same millisecond and the second
+        // is refused by RetryTracker, which is not what this test is about.
+        await new Promise((resolve) => setTimeout(resolve, 5))
+
         await recoverVtsls(ctx, 'request timeout: textDocument/definition', () => {}, true)
         await new Promise((resolve) => setTimeout(resolve, 20))
 
