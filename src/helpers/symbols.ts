@@ -127,11 +127,15 @@ export function findLocalDeclarationMatch(
         if (match !== null) {
             return
         }
-        if (node !== scopeNode && ts.isFunctionLike(node)) {
-            return
-        }
+        // Match a function declaration BEFORE pruning nested function scopes — a
+        // FunctionDeclaration is itself function-like, so the old order made this
+        // branch unreachable and store actions resolved to the return-object
+        // shorthand instead of their declaration.
         if (ts.isFunctionDeclaration(node) && node.name?.text === name) {
             match = buildNamedSymbolMatch(uri, node.name.text, 12, node, node.name, sourceFile, contentStart, text)
+            return
+        }
+        if (node !== scopeNode && ts.isFunctionLike(node)) {
             return
         }
         if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === name) {

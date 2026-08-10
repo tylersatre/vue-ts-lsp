@@ -76,18 +76,22 @@ describe('findPiniaStoreReturnedSymbol', () => {
         expect(match!.selectionRange.start.line).toBe(4)
     })
 
-    it('finds a returned function via the return-object shorthand', () => {
+    it('finds a returned function at its declaration', () => {
         const match = findPiniaStoreReturnedSymbol(SETUP_STORE_FIXTURE, storeUri, 'useCounterStore', 'increment')
         expect(match).not.toBeNull()
         expect(match!.name).toBe('increment')
-        // Function declarations resolve to the `return { ... }` shorthand identifier
-        // (line 9), not the declaration — current behavior, pinned deliberately.
-        expect(match!.selectionRange.start.line).toBe(9)
+        expect(match!.selectionRange.start.line).toBe(6)
     })
 
-    it('does not resolve options-store members (current limitation)', () => {
+    it('resolves concise-arrow-body options-store state members', () => {
+        // `state: () => ({ ... })` is the canonical Pinia idiom.
+        const match = findPiniaStoreReturnedSymbol(OPTIONS_STORE_FIXTURE, 'file:///workspace/stores/ui.ts', 'useUiStore', 'activeTab')
+        expect(match).not.toBeNull()
+        expect(match!.name).toBe('activeTab')
+    })
+
+    it('does not resolve options-store actions (current limitation)', () => {
         expect(findPiniaStoreReturnedSymbol(OPTIONS_STORE_FIXTURE, 'file:///workspace/stores/ui.ts', 'useUiStore', 'goToTab')).toBeNull()
-        expect(findPiniaStoreReturnedSymbol(OPTIONS_STORE_FIXTURE, 'file:///workspace/stores/ui.ts', 'useUiStore', 'activeTab')).toBeNull()
     })
 
     it('returns null for a property the store does not return', () => {

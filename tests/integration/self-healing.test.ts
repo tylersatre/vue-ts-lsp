@@ -199,7 +199,8 @@ describe('document lifecycle self-healing', () => {
                 position: { line: 0, character: 0 }
             })
 
-            expect(vtslsConn.sendNotification).not.toHaveBeenCalledWith('textDocument/didOpen', expect.anything())
+            // Assert on method names only: a failure must not make vitest diff a 10MB payload.
+            expect(vtslsConn.sendNotification.mock.calls.map(([method]) => method)).not.toContain('textDocument/didOpen')
         } finally {
             fs.rmSync(workDir, { recursive: true, force: true })
         }
