@@ -123,17 +123,20 @@ describe('quickInfoToHover', () => {
         const hover = quickInfoToHover({
             displayString: 'function f(): void',
             documentation: [{ text: 'Does things.' }],
-            tags: [
-                { name: 'deprecated', text: [{ text: 'use g' }] },
-                { name: 'internal' }
-            ]
+            tags: [{ name: 'deprecated', text: [{ text: 'use g' }] }, { name: 'internal' }]
         })
         expect(hover.contents.value).toBe('```ts\nfunction f(): void\n```\n\nDoes things.\n\n@deprecated use g\n@internal')
     })
 })
 
 describe('mergeIncomingCallResults', () => {
-    const item = (uri: string) => ({ uri, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, name: 'f', kind: 12, selectionRange: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } } })
+    const item = (uri: string) => ({
+        uri,
+        range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+        name: 'f',
+        kind: 12,
+        selectionRange: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }
+    })
     const span = (line: number) => ({ start: { line, character: 0 }, end: { line, character: 5 } })
 
     it('returns the initial result untouched when it is not an array or fallback is empty', () => {

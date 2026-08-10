@@ -14,8 +14,17 @@ vi.mock('@src/logger.js', () => ({
 }))
 
 import { createProxyContext, type ProxyContext } from '@src/proxy-context.js'
-const { listWorkspaceSourceFiles, getDocumentText, collectWorkspaceImporterUris, invalidateWorkspaceCachesForUri, applyWorkspaceConfigFromInitParams } =
-    await import('@src/proxy-workspace.js')
+const {
+    listWorkspaceSourceFiles,
+    getDocumentText,
+    collectWorkspaceImporterUris,
+    invalidateWorkspaceCachesForUri,
+    applyWorkspaceConfigFromInitParams,
+    applyPathPattern,
+    resolveFileCandidate,
+    loadPathAliasConfigs,
+    resolveWorkspaceModuleSpecifier
+} = await import('@src/proxy-workspace.js')
 const { setupDocumentLifecycleHandlers } = await import('@src/proxy-handlers.js')
 
 type MockConnection = {
@@ -251,6 +260,117 @@ describe('workspace scan caching', () => {
 
             expect(ctx.workspaceScanCache.fileLists.size).toBe(0)
             expect(ctx.pathAliasConfigCache.size).toBe(0)
+        })
+    })
+})
+
+describe('path alias resolution', () => {
+    let workDir: string
+    let ctx: ProxyContext
+
+    beforeEach(() => {
+        workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vue-ts-lsp-alias-'))
+        ctx = (() => {
+            const context = createProxyContext(
+                createMockConnection() as unknown as MessageConnection,
+                createMockConnection() as unknown as MessageConnection,
+                createMockConnection() as unknown as MessageConnection
+            )
+            context.savedInitParams = {
+                processId: null,
+                rootUri: pathToFileURL(workDir).href,
+                workspaceFolders: [{ uri: pathToFileURL(workDir).href, name: 'workspace' }],
+                capabilities: {}
+            }
+            return context
+        })()
+    })
+
+    afterEach(() => {
+        fs.rmSync(workDir, { recursive: true, force: true })
+    })
+
+    describe('applyPathPattern', () => {
+        it('substitutes the wildcard middle into the target', () => {
+            expect(applyPathPattern('@/*', 'src/*', '@/stores/ui')).toBe('src/stores/ui')
+        })
+
+        it('requires prefix and suffix to match', () => {
+            expect(applyPathPattern('@/*', 'src/*', 'lib/stores/ui')).toBeNull()
+            expect(applyPathPattern('@/*.ts', 'src/*.ts', '@/stores/ui.js')).toBeNull()
+        })
+
+        it('handles exact patterns without wildcards', () => {
+            expect(applyPathPattern('vue', 'node_modules/vue', 'vue')).toBe('node_modules/vue')
+            expect(applyPathPattern('vue', 'node_modules/vue', 'vue-router')).toBeNull()
+        })
+    })
+
+    describe('resolveFileCandidate', () => {
+        it('prefers the exact path, then tries extensions in order', () => {
+            fs.writeFileSync(path.join(workDir, 'mod.ts'), '')
+            fs.writeFileSync(path.join(workDir, 'mod.js'), '')
+            expect(resolveFileCandidate(path.join(workDir, 'mod'))).toBe(path.join(workDir, 'mod.ts'))
+        })
+
+        it('falls back to directory index files', () => {
+            fs.mkdirSync(path.join(workDir, 'pkg'))
+            fs.writeFileSync(path.join(workDir, 'pkg', 'index.vue'), '')
+            expect(resolveFileCandidate(path.join(workDir, 'pkg'))).toBe(path.join(workDir, 'pkg', 'index.vue'))
+        })
+
+        it('returns null when nothing exists', () => {
+            expect(resolveFileCandidate(path.join(workDir, 'missing'))).toBeNull()
+        })
+    })
+
+    describe('loadPathAliasConfigs', () => {
+        it('reads baseUrl and paths from tsconfig.json', () => {
+            fs.writeFileSync(path.join(workDir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { baseUrl: '.', paths: { '@/*': ['src/*'] } } }))
+            const configs = loadPathAliasConfigs(ctx, workDir)
+            expect(configs).toHaveLength(1)
+            expect(configs[0]!.baseUrl).toBe(workDir)
+            expect(configs[0]!.paths).toEqual({ '@/*': ['src/*'] })
+        })
+
+        it('includes jsconfig.json alongside tsconfig.json', () => {
+            fs.writeFileSync(path.join(workDir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { baseUrl: '.' } }))
+            fs.writeFileSync(path.join(workDir, 'jsconfig.json'), JSON.stringify({ compilerOptions: { paths: { 'Lib/*': ['lib/*'] } } }))
+            const configs = loadPathAliasConfigs(ctx, workDir)
+            expect(configs).toHaveLength(2)
+        })
+
+        it('skips configs without baseUrl or paths and tolerates missing files', () => {
+            fs.writeFileSync(path.join(workDir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: true } }))
+            expect(loadPathAliasConfigs(ctx, workDir)).toEqual([])
+        })
+
+        it('caches per root path', () => {
+            fs.writeFileSync(path.join(workDir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { baseUrl: '.' } }))
+            const first = loadPathAliasConfigs(ctx, workDir)
+            expect(loadPathAliasConfigs(ctx, workDir)).toBe(first)
+        })
+    })
+
+    describe('resolveWorkspaceModuleSpecifier', () => {
+        it('resolves relative imports against the requesting file', () => {
+            fs.mkdirSync(path.join(workDir, 'src'))
+            fs.writeFileSync(path.join(workDir, 'src', 'helper.ts'), '')
+            const requestUri = pathToFileURL(path.join(workDir, 'src', 'main.ts')).href
+            expect(resolveWorkspaceModuleSpecifier(ctx, requestUri, './helper')).toBe(path.join(workDir, 'src', 'helper.ts'))
+        })
+
+        it('resolves aliased imports through tsconfig paths', () => {
+            fs.mkdirSync(path.join(workDir, 'src', 'stores'), { recursive: true })
+            fs.writeFileSync(path.join(workDir, 'src', 'stores', 'ui.ts'), '')
+            fs.writeFileSync(path.join(workDir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { baseUrl: '.', paths: { '@/*': ['src/*'] } } }))
+            const requestUri = pathToFileURL(path.join(workDir, 'main.ts')).href
+            expect(resolveWorkspaceModuleSpecifier(ctx, requestUri, '@/stores/ui')).toBe(path.join(workDir, 'src', 'stores', 'ui.ts'))
+        })
+
+        it('returns null for unresolvable bare specifiers', () => {
+            const requestUri = pathToFileURL(path.join(workDir, 'main.ts')).href
+            expect(resolveWorkspaceModuleSpecifier(ctx, requestUri, 'left-pad')).toBeNull()
         })
     })
 })

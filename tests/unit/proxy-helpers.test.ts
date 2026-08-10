@@ -11,7 +11,12 @@ import {
     findImportByLocalName
 } from '@src/helpers/imports.js'
 import { createDefinitionProbe, isInternalProbeUri } from '@src/helpers/probes.js'
-import { findReferenceTargetAtPosition, collectIdentifierReferencesInDocument, collectReferenceTargetsForChanges, getIdentifierIndex } from '@src/helpers/references.js'
+import {
+    findReferenceTargetAtPosition,
+    collectIdentifierReferencesInDocument,
+    collectReferenceTargetsForChanges,
+    getIdentifierIndex
+} from '@src/helpers/references.js'
 import { findScriptSymbolByName, normalizeDocumentSymbolKinds } from '@src/helpers/symbols.js'
 import { parseTsserverRequest, summarizeBridgeResponseBody } from '@src/helpers/tsserver.js'
 import { findVueTemplateComponentAtPosition, normalizeVueTemplateExpressionPosition, isVueTemplatePosition } from '@src/helpers/vue-template.js'

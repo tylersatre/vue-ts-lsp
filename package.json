@@ -18,7 +18,8 @@
         "typecheck:tests": "tsc --project tsconfig.tests.json --noEmit",
         "release": "npm run build && changeset publish",
         "version-packages": "changeset version && node scripts/sync-plugin-version.mjs",
-        "changeset": "changeset"
+        "changeset": "changeset",
+        "test:coverage": "vitest run --coverage"
     },
     "dependencies": {
         "@vtsls/language-server": "^0.3.0",
@@ -30,6 +31,7 @@
     "devDependencies": {
         "@changesets/cli": "^2.31.0",
         "@types/node": "^26.0.1",
+        "@vitest/coverage-v8": "^4.1.9",
         "prettier": "^3.8.4",
         "tsup": "^8.5.1",
         "vitest": "^4.1.9"
