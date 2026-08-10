@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { MessageConnection } from 'vscode-jsonrpc/node'
-import { createProxyContext } from '@src/proxy-context.js'
-import { recoverVueLs } from '@src/proxy-recovery.js'
+import { createProxyContext, type ProxyContext } from '@src/proxy-context.js'
+import { recoverVtsls, recoverVueLs } from '@src/proxy-recovery.js'
 
 type MockConnection = {
     sendRequest: ReturnType<typeof vi.fn>
@@ -39,7 +39,177 @@ function createDeferred<T>(): {
     return { promise, resolve, reject }
 }
 
+function tick(): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, 0))
+}
+
+const SAVED_INIT_PARAMS = {
+    processId: null,
+    rootUri: 'file:///workspace',
+    workspaceFolders: [{ uri: 'file:///workspace', name: 'workspace' }],
+    capabilities: {}
+}
+
+function createVtslsRecoveryContext(options?: { maxRestarts?: number; recoveredConn?: MockConnection; killVtsls?: () => void }): {
+    ctx: ProxyContext
+    oldVtsls: MockConnection
+    recoveredConn: MockConnection
+    spawnVtsls: ReturnType<typeof vi.fn>
+    spawnedKill: ReturnType<typeof vi.fn>
+} {
+    const upstream = createMockConnection()
+    const oldVtsls = createMockConnection()
+    const vueLsConn = createMockConnection()
+    const recoveredConn = options?.recoveredConn ?? createMockConnection()
+    const spawnedKill = vi.fn()
+    const spawnVtsls = vi.fn().mockReturnValue({ conn: recoveredConn, kill: spawnedKill })
+
+    const ctx = createProxyContext(
+        upstream as unknown as MessageConnection,
+        oldVtsls as unknown as MessageConnection,
+        vueLsConn as unknown as MessageConnection,
+        {
+            spawnVtsls: () => spawnVtsls() as { conn: MessageConnection; kill: () => void },
+            killVtsls: options?.killVtsls,
+            delayMs: 0,
+            maxRestarts: options?.maxRestarts
+        }
+    )
+    ctx.savedInitParams = SAVED_INIT_PARAMS
+    ctx.savedVueTypescriptPluginLocation = '/mock/plugin'
+    return { ctx, oldVtsls, recoveredConn, spawnVtsls, spawnedKill }
+}
+
+function didOpenCallsFor(conn: MockConnection, uri: string): unknown[][] {
+    return conn.sendNotification.mock.calls.filter(
+        (call) => call[0] === 'textDocument/didOpen' && (call[1] as { textDocument: { uri: string } }).textDocument.uri === uri
+    )
+}
+
+describe('recoverVtsls', () => {
+    it('replays every open document on the recovered connection', async () => {
+        const { ctx, recoveredConn } = createVtslsRecoveryContext()
+        ctx.documentStore.open('file:///workspace/a.ts', 'typescript', 1, 'const a = 1;')
+        ctx.documentStore.open('file:///workspace/b.vue', 'vue', 3, '<template/>')
+
+        await recoverVtsls(ctx, 'connection closed', () => {})
+
+        expect(recoveredConn.sendRequest).toHaveBeenCalledWith('initialize', expect.anything())
+        expect(didOpenCallsFor(recoveredConn, 'file:///workspace/a.ts')).toHaveLength(1)
+        expect(didOpenCallsFor(recoveredConn, 'file:///workspace/b.vue')).toHaveLength(1)
+        expect(ctx.currentVtsls).toBe(recoveredConn)
+    })
+
+    it('does not publish the recovered connection until initialize and replay complete', async () => {
+        const { ctx, oldVtsls, recoveredConn } = createVtslsRecoveryContext()
+        const initDeferred = createDeferred<unknown>()
+        recoveredConn.sendRequest.mockReturnValue(initDeferred.promise)
+        ctx.documentStore.open('file:///workspace/a.ts', 'typescript', 1, 'const a = 1;')
+
+        const recovery = recoverVtsls(ctx, 'connection closed', () => {})
+        await tick()
+
+        // While the fresh child is still initializing, upstream notifications must keep
+        // routing to the previous connection object, not the uninitialized one.
+        expect(ctx.currentVtsls).toBe(oldVtsls)
+
+        initDeferred.resolve({ capabilities: {} })
+        await recovery
+
+        expect(ctx.currentVtsls).toBe(recoveredConn)
+        expect(didOpenCallsFor(recoveredConn, 'file:///workspace/a.ts')).toHaveLength(1)
+    })
+
+    it('never sends a mid-recovery didChange to the uninitialized connection and replays the changed content', async () => {
+        const { ctx, recoveredConn } = createVtslsRecoveryContext()
+        const initDeferred = createDeferred<unknown>()
+        recoveredConn.sendRequest.mockReturnValue(initDeferred.promise)
+        ctx.documentStore.open('file:///workspace/a.ts', 'typescript', 1, 'const a = 1;')
+
+        const recovery = recoverVtsls(ctx, 'connection closed', () => {})
+        await tick()
+
+        // Simulate what the didChange lifecycle handler does mid-recovery: update the
+        // store and forward to whatever connection ctx currently points at.
+        ctx.documentStore.change('file:///workspace/a.ts', 2, [{ text: 'const a = 2;' }])
+        ctx.currentVtsls.sendNotification('textDocument/didChange', {
+            textDocument: { uri: 'file:///workspace/a.ts', version: 2 },
+            contentChanges: [{ text: 'const a = 2;' }]
+        })
+
+        initDeferred.resolve({ capabilities: {} })
+        await recovery
+
+        const didChangeCalls = recoveredConn.sendNotification.mock.calls.filter((call) => call[0] === 'textDocument/didChange')
+        expect(didChangeCalls).toHaveLength(0)
+        const replayed = didOpenCallsFor(recoveredConn, 'file:///workspace/a.ts')
+        expect(replayed).toHaveLength(1)
+        expect((replayed[0]![1] as { textDocument: { text: string } }).textDocument.text).toBe('const a = 2;')
+    })
+
+    it('replays a document opened mid-recovery exactly once on the recovered connection', async () => {
+        const { ctx, recoveredConn } = createVtslsRecoveryContext()
+        const initDeferred = createDeferred<unknown>()
+        recoveredConn.sendRequest.mockReturnValue(initDeferred.promise)
+
+        const recovery = recoverVtsls(ctx, 'connection closed', () => {})
+        await tick()
+
+        // Simulate what the didOpen lifecycle handler does mid-recovery.
+        ctx.documentStore.open('file:///workspace/new.ts', 'typescript', 1, 'const fresh = true;')
+        ctx.currentVtsls.sendNotification('textDocument/didOpen', {
+            textDocument: { uri: 'file:///workspace/new.ts', languageId: 'typescript', version: 1, text: 'const fresh = true;' }
+        })
+
+        initDeferred.resolve({ capabilities: {} })
+        await recovery
+
+        expect(didOpenCallsFor(recoveredConn, 'file:///workspace/new.ts')).toHaveLength(1)
+    })
+
+    it('shows a message and does not spawn when the retry cap is reached', async () => {
+        const { ctx, oldVtsls, spawnVtsls } = createVtslsRecoveryContext({ maxRestarts: 0 })
+
+        await recoverVtsls(ctx, 'connection closed', () => {})
+
+        expect(spawnVtsls).not.toHaveBeenCalled()
+        expect(ctx.currentVtsls).toBe(oldVtsls)
+        expect((ctx.upstream as unknown as MockConnection).sendNotification).toHaveBeenCalledWith(
+            'window/showMessage',
+            expect.objectContaining({ message: expect.stringContaining('crashed too many times') })
+        )
+    })
+
+    it('kills the spawned child and leaves the old connection published when initialize fails', async () => {
+        const { ctx, oldVtsls, recoveredConn, spawnedKill } = createVtslsRecoveryContext()
+        recoveredConn.sendRequest.mockRejectedValue(new Error('initialize failed'))
+
+        await expect(recoverVtsls(ctx, 'connection closed', () => {})).rejects.toThrow('initialize failed')
+
+        expect(ctx.currentVtsls).toBe(oldVtsls)
+        expect(spawnedKill).toHaveBeenCalled()
+    })
+})
+
 describe('recoverVueLs', () => {
+    function createVueLsRecoveryContext(): { ctx: ProxyContext; oldVueLs: MockConnection; recoveredConn: MockConnection } {
+        const upstream = createMockConnection()
+        const vtslsConn = createMockConnection()
+        const oldVueLs = createMockConnection()
+        const recoveredConn = createMockConnection()
+        const ctx = createProxyContext(
+            upstream as unknown as MessageConnection,
+            vtslsConn as unknown as MessageConnection,
+            oldVueLs as unknown as MessageConnection,
+            {
+                spawnVueLs: () => recoveredConn as unknown as MessageConnection,
+                delayMs: 0
+            }
+        )
+        ctx.savedInitParams = SAVED_INIT_PARAMS
+        return { ctx, oldVueLs, recoveredConn }
+    }
+
     it('waits for an active vtsls recovery before re-initializing vue_ls', async () => {
         const upstream = createMockConnection()
         const vtslsConn = createMockConnection()
@@ -77,5 +247,33 @@ describe('recoverVueLs', () => {
         expect(spawnVueLs).toHaveBeenCalledOnce()
         expect(recoveredVueLs.listen).toHaveBeenCalledOnce()
         expect(recoveredVueLs.sendRequest).toHaveBeenCalledWith('initialize', expect.anything())
+    })
+
+    it('replays only .vue documents on the recovered connection', async () => {
+        const { ctx, recoveredConn } = createVueLsRecoveryContext()
+        ctx.documentStore.open('file:///workspace/a.ts', 'typescript', 1, 'const a = 1;')
+        ctx.documentStore.open('file:///workspace/b.vue', 'vue', 1, '<template/>')
+
+        await recoverVueLs(ctx, 'connection closed', () => {})
+
+        expect(didOpenCallsFor(recoveredConn, 'file:///workspace/b.vue')).toHaveLength(1)
+        expect(didOpenCallsFor(recoveredConn, 'file:///workspace/a.ts')).toHaveLength(0)
+        expect(ctx.currentVueLs).toBe(recoveredConn)
+    })
+
+    it('does not publish the recovered vue_ls connection until initialize and replay complete', async () => {
+        const { ctx, oldVueLs, recoveredConn } = createVueLsRecoveryContext()
+        const initDeferred = createDeferred<unknown>()
+        recoveredConn.sendRequest.mockReturnValue(initDeferred.promise)
+
+        const recovery = recoverVueLs(ctx, 'connection closed', () => {})
+        await tick()
+
+        expect(ctx.currentVueLs).toBe(oldVueLs)
+
+        initDeferred.resolve({ capabilities: {} })
+        await recovery
+
+        expect(ctx.currentVueLs).toBe(recoveredConn)
     })
 })
