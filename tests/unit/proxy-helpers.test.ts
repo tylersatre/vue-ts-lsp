@@ -15,7 +15,8 @@ import {
     findReferenceTargetAtPosition,
     collectIdentifierReferencesInDocument,
     collectReferenceTargetsForChanges,
-    getIdentifierIndex
+    getIdentifierIndex,
+    sweepIdentifierIndexCache
 } from '@src/helpers/references.js'
 import { findScriptSymbolByName, normalizeDocumentSymbolKinds } from '@src/helpers/symbols.js'
 import { parseTsserverRequest, summarizeBridgeResponseBody } from '@src/helpers/tsserver.js'
@@ -415,6 +416,19 @@ describe('collectIdentifierReferencesInDocument', () => {
 
         const locations = collectIdentifierReferencesInDocument('file:///workspace/parse-once.ts', text, 'beta')
         expect(locations).toHaveLength(1)
+    })
+
+    it('drops idle index entries after the TTL so the cache cannot retain the workspace forever', () => {
+        vi.useFakeTimers({ now: Date.now() })
+        try {
+            const text = 'const gamma = 1;\n'
+            const first = getIdentifierIndex('file:///workspace/parse-ttl.ts', text)
+            vi.advanceTimersByTime(60_000)
+            sweepIdentifierIndexCache()
+            expect(getIdentifierIndex('file:///workspace/parse-ttl.ts', text)).not.toBe(first)
+        } finally {
+            vi.useRealTimers()
+        }
     })
 
     it('recomputes identifier references when the text changes', () => {

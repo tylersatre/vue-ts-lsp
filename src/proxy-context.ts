@@ -6,7 +6,7 @@ import { createWorkspaceScanCache, type WorkspaceScanCache } from './proxy-works
 import { RetryTracker } from './recovery.js'
 import type { WorkspaceConfig } from './config.js'
 import type { CrashRecoveryOptions, DiagnosticNudgeChannel, DiagnosticNudgeChannelState, PathAliasConfig, RecentPositionContext } from './proxy-types.js'
-import { DOWNSTREAM_REQUEST_TIMEOUT_MS } from './proxy-types.js'
+import { DOWNSTREAM_REQUEST_TIMEOUT_MS, RECOVERY_STABILITY_WINDOW_MS } from './proxy-types.js'
 
 export interface ProxyContext {
     // Connections (mutable — reassigned during crash recovery)
@@ -35,6 +35,7 @@ export interface ProxyContext {
     // RetryTracker window can't stop a chain whose attempts each outlast it.
     vtslsConsecutiveRecoveryFailures: number
     vueLsConsecutiveRecoveryFailures: number
+    recoveryStabilityWindowMs: number
 
     // Stores
     documentStore: DocumentStore
@@ -84,6 +85,7 @@ export function createProxyContext(
         vueLsRecoveryPromise: null,
         vtslsConsecutiveRecoveryFailures: 0,
         vueLsConsecutiveRecoveryFailures: 0,
+        recoveryStabilityWindowMs: crashOptions?.stabilityWindowMs ?? RECOVERY_STABILITY_WINDOW_MS,
 
         documentStore: new DocumentStore(),
         diagnosticsStore: new DiagnosticsStore(),

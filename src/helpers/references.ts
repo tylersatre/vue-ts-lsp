@@ -215,13 +215,32 @@ export function findEnclosingReferenceTargetAtPosition(uri: string, text: string
 // One TS parse serves every identifier query against the same text: the workspace
 // reference fallback asks about up to 3 identifiers per file per edit, and a fresh
 // parse per identifier was the dominant per-edit cost. Content-validated (a text
-// mismatch reparses), so staleness is impossible; bounded by wholesale clear.
+// mismatch reparses), so staleness is impossible. Resident memory is bounded three
+// ways: per-URI eviction from document lifecycle events (proxy-workspace wires
+// deleteIdentifierIndexEntry/sweepIdentifierIndexCache in), a TTL sweep so idle
+// sessions do not retain the whole workspace's source and ranges, and a wholesale
+// clear as a hard cap.
 const IDENTIFIER_INDEX_CACHE_MAX_ENTRIES = 2048
-const identifierIndexCache = new Map<string, { text: string; index: Map<string, Range[]> }>()
+const IDENTIFIER_INDEX_CACHE_TTL_MS = 5_000
+const identifierIndexCache = new Map<string, { text: string; index: Map<string, Range[]>; cachedAt: number }>()
+
+export function deleteIdentifierIndexEntry(uri: string): void {
+    identifierIndexCache.delete(uri)
+}
+
+export function sweepIdentifierIndexCache(): void {
+    const now = Date.now()
+    for (const [uri, entry] of identifierIndexCache) {
+        if (now - entry.cachedAt > IDENTIFIER_INDEX_CACHE_TTL_MS) {
+            identifierIndexCache.delete(uri)
+        }
+    }
+}
 
 export function getIdentifierIndex(uri: string, text: string): Map<string, Range[]> {
     const cached = identifierIndexCache.get(uri)
     if (cached !== undefined && cached.text === text) {
+        cached.cachedAt = Date.now()
         return cached.index
     }
 
@@ -247,9 +266,12 @@ export function getIdentifierIndex(uri: string, text: string): Map<string, Range
     }
 
     if (identifierIndexCache.size >= IDENTIFIER_INDEX_CACHE_MAX_ENTRIES) {
-        identifierIndexCache.clear()
+        sweepIdentifierIndexCache()
+        if (identifierIndexCache.size >= IDENTIFIER_INDEX_CACHE_MAX_ENTRIES) {
+            identifierIndexCache.clear()
+        }
     }
-    identifierIndexCache.set(uri, { text, index })
+    identifierIndexCache.set(uri, { text, index, cachedAt: Date.now() })
     return index
 }
 

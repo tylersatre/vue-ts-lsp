@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest'
 const RELEASE_WORKFLOW_PATH = path.resolve(process.cwd(), '.github', 'workflows', 'release.yml')
 
 const CI_WORKFLOW_PATH = path.resolve(process.cwd(), '.github', 'workflows', 'ci.yml')
-const STDOUT_GUARD_PATTERN = String.raw`console\.(log|info|warn|dir|table)|process\.stdout\.write`
+const STDOUT_GUARD_PATTERN = String.raw`console\.[A-Za-z]+\(|process\.stdout`
 
 describe('release workflow', () => {
     it('installs smoke fixture dependencies before running tests', () => {

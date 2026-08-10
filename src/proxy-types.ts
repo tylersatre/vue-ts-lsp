@@ -103,6 +103,7 @@ export interface CrashRecoveryOptions {
     delayMs?: number
     maxRestarts?: number
     windowMs?: number
+    stabilityWindowMs?: number
     killVtsls?: () => void
     killVueLs?: () => void
     shutdownTimeoutMs?: number
@@ -130,6 +131,10 @@ export interface DiagnosticNudgeChannelState {
     pending: Map<string, ReturnType<typeof setTimeout>>
     queued: Set<string>
 }
+
+// A recovered child must stay alive this long before its crash resets the
+// consecutive-recovery give-up budget.
+export const RECOVERY_STABILITY_WINDOW_MS = 30_000
 
 export const WORKSPACE_SCAN_CACHE_TTL_MS = 5_000
 export const SCRIPT_DEPENDENT_DIAGNOSTIC_SYMBOL_LIMIT = 3

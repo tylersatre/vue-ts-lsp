@@ -8,6 +8,7 @@ import type { PathAliasConfig } from './proxy-types.js'
 import { WORKSPACE_SCAN_CACHE_TTL_MS } from './proxy-types.js'
 import { uriToFilePath } from './proxy-utils.js'
 import { collectImportedModuleSpecifiers } from './helpers/imports.js'
+import { deleteIdentifierIndexEntry, sweepIdentifierIndexCache } from './helpers/references.js'
 import { loadWorkspaceConfig } from './config.js'
 import * as logger from './logger.js'
 
@@ -69,6 +70,8 @@ export function invalidateWorkspaceCachesForUri(ctx: ProxyContext, uri: string):
     ctx.workspaceScanCache.importerUris.clear()
     ctx.workspaceScanCache.fileLists.clear()
     sweepExpiredEntries(ctx.workspaceScanCache.fileTexts)
+    deleteIdentifierIndexEntry(uri)
+    sweepIdentifierIndexCache()
 }
 
 export function clearWorkspaceScanCaches(ctx: ProxyContext): void {

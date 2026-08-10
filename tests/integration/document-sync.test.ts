@@ -1124,6 +1124,44 @@ describe('document synchronization forwarding', () => {
         }
     })
 
+    it('does not treat vue_ls publishes as fresh vtsls diagnostics when deciding to nudge', async () => {
+        vi.useFakeTimers()
+        await upstream.triggerRequest('initialize', initParams)
+
+        upstream.triggerNotification('textDocument/didOpen', {
+            textDocument: {
+                uri: 'file:///workspace/components/App.vue',
+                languageId: 'vue',
+                version: 1,
+                text: '<template><div>{{ count }}</div></template>\n<script setup lang="ts">const count = 1</script>'
+            }
+        })
+        vtslsConn.sendRequest.mockClear()
+
+        try {
+            upstream.triggerNotification('textDocument/didChange', {
+                textDocument: {
+                    uri: 'file:///workspace/components/App.vue',
+                    version: 2
+                },
+                contentChanges: [{ text: '<template><div>{{ count + 1 }}</div></template>' }]
+            })
+
+            await vi.advanceTimersByTimeAsync(100)
+            // Only vue_ls publishes — that must not satisfy the vtsls freshness check,
+            // or TypeScript diagnostics go stale after edits.
+            vueLsConn.triggerNotification('textDocument/publishDiagnostics', {
+                uri: 'file:///workspace/components/App.vue',
+                diagnostics: []
+            })
+            await vi.advanceTimersByTimeAsync(4000)
+
+            expect(vtslsConn.sendRequest.mock.calls.filter(([method]) => method === 'workspace/executeCommand').length).toBeGreaterThan(0)
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
     it('does not restart vtsls when a background diagnostics nudge times out', async () => {
         vi.useFakeTimers()
         const upstream = createMockConnection()

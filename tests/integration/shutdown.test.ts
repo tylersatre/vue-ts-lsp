@@ -128,6 +128,34 @@ describe('graceful shutdown', () => {
         exitSpy.mockRestore()
     })
 
+    it('force-kills children when the upstream closes during an in-flight shutdown', async () => {
+        const upstream = createMockConnection()
+        const vtslsConn = createMockConnection()
+        const vueLsConn = createMockConnection()
+        const killVtsls = vi.fn()
+        const killVueLs = vi.fn()
+        const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+
+        setupProxy(upstream as unknown as MessageConnection, vtslsConn as unknown as MessageConnection, vueLsConn as unknown as MessageConnection, {
+            killVtsls,
+            killVueLs
+        })
+        await upstream.triggerRequest('initialize', initParams)
+        // Children are wedged: the shutdown request never resolves.
+        vtslsConn.sendRequest.mockImplementation(() => new Promise(() => {}))
+        vueLsConn.sendRequest.mockImplementation(() => new Promise(() => {}))
+
+        void upstream.triggerRequest('shutdown')
+        upstream.triggerClose()
+        await new Promise((resolve) => setTimeout(resolve, 0))
+
+        expect(killVtsls).toHaveBeenCalled()
+        expect(killVueLs).toHaveBeenCalled()
+        expect(exitSpy).toHaveBeenCalledWith(0)
+
+        exitSpy.mockRestore()
+    })
+
     it('does not re-run child shutdown when the upstream closes after the LSP shutdown request', async () => {
         const upstream = createMockConnection()
         const vtslsConn = createMockConnection()

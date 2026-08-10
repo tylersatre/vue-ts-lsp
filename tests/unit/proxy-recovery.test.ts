@@ -50,7 +50,13 @@ const SAVED_INIT_PARAMS = {
     capabilities: {}
 }
 
-function createVtslsRecoveryContext(options?: { maxRestarts?: number; windowMs?: number; recoveredConn?: MockConnection; killVtsls?: () => void }): {
+function createVtslsRecoveryContext(options?: {
+    maxRestarts?: number
+    windowMs?: number
+    stabilityWindowMs?: number
+    recoveredConn?: MockConnection
+    killVtsls?: () => void
+}): {
     ctx: ProxyContext
     oldVtsls: MockConnection
     recoveredConn: MockConnection
@@ -73,7 +79,8 @@ function createVtslsRecoveryContext(options?: { maxRestarts?: number; windowMs?:
             killVtsls: options?.killVtsls,
             delayMs: 0,
             maxRestarts: options?.maxRestarts,
-            windowMs: options?.windowMs
+            windowMs: options?.windowMs,
+            stabilityWindowMs: options?.stabilityWindowMs
         }
     )
     ctx.savedInitParams = SAVED_INIT_PARAMS
@@ -240,6 +247,55 @@ describe('recoverVtsls', () => {
 
         expect(spawnVtsls).toHaveBeenCalledTimes(2)
         expect(ctx.currentVtsls).toBe(secondConn)
+    })
+
+    it('gives up when replacements keep crashing shortly after successful recovery', async () => {
+        // A child that initializes fine but dies e.g. 15s later defeats both the
+        // sliding retry window (cycle > windowMs/maxRestarts) and any counter that
+        // resets on publish. Only crashes after a stability period may reset.
+        const { ctx, recoveredConn, spawnVtsls } = createVtslsRecoveryContext({ maxRestarts: 2, windowMs: 1 })
+        const conns = [recoveredConn, createMockConnection(), createMockConnection()]
+        spawnVtsls.mockReset()
+        for (const conn of conns) {
+            spawnVtsls.mockReturnValueOnce({ conn, kill: vi.fn() })
+        }
+
+        await recoverVtsls(ctx, 'connection closed', () => {})
+        expect(ctx.currentVtsls).toBe(conns[0])
+
+        for (let i = 0; i < 2; i++) {
+            const onCloseHandler = conns[i]!.onClose.mock.calls[0]![0] as () => void
+            onCloseHandler()
+            await new Promise((resolve) => setTimeout(resolve, 20))
+        }
+
+        expect(spawnVtsls).toHaveBeenCalledTimes(2)
+        expect((ctx.upstream as unknown as MockConnection).sendNotification).toHaveBeenCalledWith(
+            'window/showMessage',
+            expect.objectContaining({ message: expect.stringContaining('crashed too many times') })
+        )
+    })
+
+    it('a crash after the stability window resets the give-up budget', async () => {
+        const { ctx, recoveredConn, spawnVtsls } = createVtslsRecoveryContext({ maxRestarts: 1, windowMs: 1, stabilityWindowMs: 30 })
+        const secondConn = createMockConnection()
+        spawnVtsls.mockReset()
+        spawnVtsls.mockReturnValueOnce({ conn: recoveredConn, kill: vi.fn() }).mockReturnValueOnce({ conn: secondConn, kill: vi.fn() })
+
+        await recoverVtsls(ctx, 'connection closed', () => {})
+        expect(ctx.currentVtsls).toBe(recoveredConn)
+
+        // The replacement stays healthy past the stability window before crashing.
+        await new Promise((resolve) => setTimeout(resolve, 40))
+        const onCloseHandler = recoveredConn.onClose.mock.calls[0]![0] as () => void
+        onCloseHandler()
+        await new Promise((resolve) => setTimeout(resolve, 20))
+
+        expect(ctx.currentVtsls).toBe(secondConn)
+        expect((ctx.upstream as unknown as MockConnection).sendNotification).not.toHaveBeenCalledWith(
+            'window/showMessage',
+            expect.objectContaining({ message: expect.stringContaining('crashed too many times') })
+        )
     })
 
     it('stops retrying failed recoveries once the retry cap is reached', async () => {

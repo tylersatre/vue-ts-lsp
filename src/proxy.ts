@@ -163,8 +163,12 @@ export function setupProxy(
 
     const shutdownOnSignal = () => {
         if (shutdownStarted) {
-            // Children are already being shut down (or a second signal arrived
-            // mid-shutdown — treat it as a force quit): just flush and go.
+            // A shutdown is already in flight (or a second signal arrived — treat it
+            // as a force quit). The graceful path's SIGTERM-on-timeout may never get
+            // to run before we exit, so kill the children outright: exiting here with
+            // live children would orphan two memory-heavy processes.
+            ctx.currentKillVtsls?.()
+            ctx.currentKillVueLs?.()
             flushLogsAndExit()
             return
         }

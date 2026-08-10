@@ -32,11 +32,15 @@ jobs:
             - run: npm ci
 
             # stdout is the JSON-RPC transport: any stray write corrupts the protocol.
-            # The only legitimate process.stdout reference is the StreamMessageWriter
-            # in src/upstream.ts, which this pattern deliberately does not match.
+            # Every console.* call is banned in src/ (console.debug/log/info write to
+            # stdout; the rest are banned as policy — use the logger). The one
+            # legitimate process.stdout reference (the StreamMessageWriter in
+            # src/upstream.ts) is excluded explicitly. Not catchable here: dynamic
+            # forms like console['log'], fs.writeSync(1, ...), or piping to
+            # process.stdout via an alias.
             - name: Stdout safety check
               run: |
-                  if grep -rnE 'console\.(log|info|warn|dir|table)|process\.stdout\.write' src/; then
+                  if grep -rnE 'console\.[A-Za-z]+\(|process\.stdout' src/ | grep -v 'src/upstream.ts:'; then
                     echo "::error::stdout-writing call found in source — stdout is the JSON-RPC transport"
                     exit 1
                   fi

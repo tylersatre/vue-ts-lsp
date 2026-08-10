@@ -116,8 +116,14 @@ function recoverServer(
         logger.info('proxy', `${spec.server} recovery starting reason=${reason}`)
 
         const retry = spec.getRetry(ctx)
-        if (!retry.canRestart()) {
-            logger.error('proxy', `${spec.server}: retry cap reached (max ${retry.maxRestarts} in ${retry.windowMs / 1000}s)`)
+        // Two independent bounds: the sliding window catches rapid crash bursts, and
+        // the consecutive counter catches slow cycles (crash-shortly-after-recovery
+        // and failed initializes) that the window's timestamp eviction cannot see.
+        if (spec.getConsecutiveFailures(ctx) >= retry.maxRestarts || !retry.canRestart()) {
+            logger.error(
+                'proxy',
+                `${spec.server}: retry cap reached (max ${retry.maxRestarts} in ${retry.windowMs / 1000}s, consecutive=${spec.getConsecutiveFailures(ctx)})`
+            )
             safeSendNotification(ctx.upstream, 'window/showMessage', {
                 type: 1,
                 message: spec.crashMessage
@@ -196,10 +202,20 @@ function recoverServer(
         // connection. A didChange sent to an uninitialized child is a protocol
         // violation that can re-crash it, and a didOpen would be duplicated by replay.
         spec.publish(ctx, spawned.conn, spawned.kill)
-        spec.setConsecutiveFailures(ctx, 0)
 
         logger.info('proxy', `${spec.server} restarted successfully`)
-        setupCrashRecoveryFor(spec, ctx, spawned.conn, (r, fk) => recoverServer(spec, ctx, r, setupHandlers, fk ?? false))
+        // The give-up budget resets only once the replacement proves stable: a crash
+        // within the stability window counts as another consecutive failure, so a
+        // child that dies shortly after every recovery cannot respawn forever.
+        const publishedAt = Date.now()
+        setupCrashRecoveryFor(spec, ctx, spawned.conn, (r, fk) => {
+            if (Date.now() - publishedAt >= ctx.recoveryStabilityWindowMs) {
+                spec.setConsecutiveFailures(ctx, 0)
+            } else {
+                spec.setConsecutiveFailures(ctx, spec.getConsecutiveFailures(ctx) + 1)
+            }
+            return recoverServer(spec, ctx, r, setupHandlers, fk ?? false)
+        })
     })().finally(() => {
         spec.setRecoveryPromise(ctx, null)
     })

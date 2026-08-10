@@ -32,7 +32,7 @@ jobs:
             # stray stdout write (stdout is the JSON-RPC transport).
             - name: Stdout safety check
               run: |
-                  if grep -rnE 'console\.(log|info|warn|dir|table)|process\.stdout\.write' src/; then
+                  if grep -rnE 'console\.[A-Za-z]+\(|process\.stdout' src/ | grep -v 'src/upstream.ts:'; then
                     echo "::error::stdout-writing call found in source — stdout is the JSON-RPC transport"
                     exit 1
                   fi

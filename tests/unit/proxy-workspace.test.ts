@@ -234,6 +234,17 @@ describe('workspace scan caching', () => {
             expect(ctx.workspaceScanCache.fileTexts.has(uri)).toBe(false)
         })
 
+        it('lifecycle invalidation drops the identifier index for the edited document', async () => {
+            const { getIdentifierIndex } = await import('@src/helpers/references.js')
+            const uri = pathToFileURL(path.join(workDir, 'target.ts')).href
+            const first = getIdentifierIndex(uri, 'export const target = 1;\n')
+            expect(getIdentifierIndex(uri, 'export const target = 1;\n')).toBe(first)
+
+            invalidateWorkspaceCachesForUri(ctx, uri)
+
+            expect(getIdentifierIndex(uri, 'export const target = 1;\n')).not.toBe(first)
+        })
+
         it('didSave and didClose invalidate the saved document text', () => {
             setupDocumentLifecycleHandlers(ctx)
             const uri = pathToFileURL(path.join(workDir, 'target.ts')).href
