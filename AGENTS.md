@@ -37,7 +37,7 @@ The critical glue between the two servers. vue_ls sends `tsserver/request` → p
 
 ### Client lifecycle self-healing
 
-Claude Code (verified against 2.1.226; re-verify and bump this version when client behavior is re-audited) always sends **full-text** `didChange` (it ignores the advertised sync kind) and — critically — does **not** replay `didOpen` when it restarts a crashed proxy: its open-file map survives the restart, so didChange notifications and LSP requests arrive for documents the child servers never saw. Since 2.1.208 it *does* send `didClose` when a document is evicted from its 50-open-doc LRU cap (evicted docs get a fresh `didOpen` when touched again) — before that it never sent `didClose` at all. The proxy self-heals the remaining mismatches:
+Claude Code (verified against 2.1.226; re-verify and bump this version when client behavior is re-audited) always sends **full-text** `didChange` (it ignores the advertised sync kind) and — critically — does **not** replay `didOpen` when it restarts a crashed proxy: its open-file map survives the restart, so didChange notifications and LSP requests arrive for documents the child servers never saw. Since 2.1.208 it _does_ send `didClose` when a document is evicted from its 50-open-doc LRU cap (evicted docs get a fresh `didOpen` when touched again) — before that it never sent `didClose` at all. The proxy self-heals the remaining mismatches:
 
 - `didChange` for an unopened document with a full-text change → synthesized `didOpen` downstream.
 - `didOpen` for an already-open document → forwarded as a ranged full-document `didChange` (a second didOpen is a protocol violation).
