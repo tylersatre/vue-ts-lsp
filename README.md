@@ -88,6 +88,8 @@ Claude Code also accepts these optional fields in `.lsp.json` (as of Claude Code
 
 > **Note:** On Claude Code 2.1.204 and earlier, `restartOnCrash` and `shutdownTimeout` were recognized but rejected ("not yet implemented") and would prevent the server from starting. Both work on 2.1.226+. Client-level restart is complementary to the proxy's own crash recovery for its child servers — the proxy also self-heals the client's no-`didOpen`-replay behavior after a restart.
 
+> **Note:** The proxy itself also handles `.mts`/`.cts`/`.mjs`/`.cjs` files; the plugin's `extensionToLanguage` map advertises only the common five extensions, so files with the rarer extensions get LSP features when reached through cross-file navigation but do not activate the server on open. Extend the map in a manual install if you need that.
+
 > **Note:** This proxy replaces separate vtsls and vue-volar plugins. Do not enable them simultaneously: Claude Code assigns each file extension to the first plugin that claims it, so a competing TypeScript plugin (e.g. `typescript-lsp`) can capture `.ts`/`.tsx` files while this proxy serves `.vue` — splitting the two sides of cross-file navigation across unrelated servers.
 
 ### 3. Verify
@@ -123,7 +125,15 @@ The proxy currently exposes the Claude Code request surface implemented in this 
 | `.vue`                       | diagnostics                                                                     | Merged from both servers |
 | Any                          | workspace/symbol                                                                | vtsls                    |
 
-For architecture details, see [CLAUDE.md](CLAUDE.md).
+For architecture details, see [AGENTS.md](AGENTS.md).
+
+### How library definitions work
+
+Go-to-definition on a symbol from `node_modules` returns a URI under `~/.cache/vue-ts-lsp/definition-mirrors/` rather than the raw `node_modules` path: the proxy copies the target declaration file into that cache and rewrites the location. This keeps results stable and readable for Claude Code. The cache is safe to delete at any time (it is rebuilt on demand), and its root can be moved with the `VUE_TS_LSP_DEFINITION_MIRROR_ROOT` environment variable.
+
+### TypeScript versions
+
+vtsls ships with its own bundled TypeScript, but the proxy sets `autoUseWorkspaceTsdk: true`, so when your project has `typescript` installed, that version's tsserver does the analysis — your diagnostics match your project's compiler. The proxy's own internal AST helpers (used by fallback scans) run on its bundled TypeScript 6, independent of your workspace version. Note: the proxy pins `typescript@^6.0.3` deliberately — TypeScript 7 has no programmatic API for vtsls or `@vue/typescript-plugin` to use.
 
 ## CLI usage
 
@@ -166,7 +176,7 @@ Notes:
 - Cross-file diagnostics after changing exported function signatures, store APIs, or narrowed unions are improved but not guaranteed to appear immediately in every dependent file, especially in large mixed workspaces.
 - If your workflow depends on catching downstream breakage after API changes, do not treat "no diagnostic appeared" as proof that all callers are valid. Prefer `findReferences`, a targeted typecheck, or project-specific verification hooks for high-confidence changes.
 - Go-to-definition can be sensitive to the exact character position in complex TypeScript expressions such as `keyof typeof ...`. If a lookup misses unexpectedly, retry with the cursor placed directly on the referenced symbol.
-- Template definition support is strongest for standard bound expressions such as `:prop="value"`. Shorthand boolean props and directive-based bindings such as `v-model` may not always resolve to the child prop or backing script symbol.
+- Template definition support is strongest for standard bound expressions such as `:prop="value"`. Member expressions inside `v-model` (e.g. `v-model="charge.name"`) resolve for hover and definition (covered by the smoke suite); what remains unreliable is shorthand boolean props and resolving the `v-model` directive itself to the child component's prop declaration.
 - `textDocument/implementation` follows downstream TypeScript and Vue language-server behavior. Interfaces or structural types backed by object literals may legitimately return no implementation result.
 - Project hooks that rewrite files after `Edit` or `Write` tool calls, such as running Prettier, can add an extra mutation step and make diagnostic timing harder to reason about.
 - After reverting a cross-file type break, dependent-file diagnostics may occasionally clear a beat later than the edit that fixed them.
@@ -197,14 +207,14 @@ cd vue-ts-lsp
 npm install
 ```
 
-| Command                         | Description                                    |
-| ------------------------------- | ---------------------------------------------- |
-| `npm run build`                 | Build with tsup (src/index.ts → dist/index.js) |
-| `npm run format`                | Format the repository with Prettier            |
-| `npm run format:check`          | Check repository formatting with Prettier      |
-| `npm run typecheck`             | Type-check source and tests                    |
-| `npm test`                      | Run unit and integration tests (vitest)        |
-| `npm run install:smoke-fixture` | Install smoke test fixture dependencies        |
+| Command                         | Description                                                                           |
+| ------------------------------- | ------------------------------------------------------------------------------------- |
+| `npm run build`                 | Build with tsup (src/index.ts → dist/index.js)                                        |
+| `npm run format`                | Format the repository with Prettier                                                   |
+| `npm run format:check`          | Check repository formatting with Prettier                                             |
+| `npm run typecheck`             | Type-check source and tests                                                           |
+| `npm test`                      | Run unit, integration, and smoke tests (vitest; smoke self-skips without the fixture) |
+| `npm run install:smoke-fixture` | Install smoke test fixture dependencies                                               |
 
 > **Note:** The repo includes `.claude/settings.json` which enables the `typescript-lsp` plugin for Claude Code. This gives contributors TypeScript LSP support while working on this project. If it conflicts with your setup, you can override it in `.claude/settings.local.json`.
 
