@@ -2,6 +2,7 @@ import type { MessageConnection } from 'vscode-jsonrpc/node'
 import type { InitializeParams } from 'vscode-languageserver-protocol'
 import { DocumentStore } from './documents.js'
 import { DiagnosticsStore } from './diagnostics.js'
+import { createWorkspaceScanCache, type WorkspaceScanCache } from './proxy-workspace.js'
 import { RetryTracker } from './recovery.js'
 import type { WorkspaceConfig } from './config.js'
 import type { CrashRecoveryOptions, PathAliasConfig, RecentPositionContext } from './proxy-types.js'
@@ -35,6 +36,7 @@ export interface ProxyContext {
     documentStore: DocumentStore
     diagnosticsStore: DiagnosticsStore
     pathAliasConfigCache: Map<string, PathAliasConfig[]>
+    workspaceScanCache: WorkspaceScanCache
 
     // Diagnostics nudging
     lastVtslsDiagnosticsAt: Map<string, number>
@@ -85,6 +87,7 @@ export function createProxyContext(
         documentStore: new DocumentStore(),
         diagnosticsStore: new DiagnosticsStore(),
         pathAliasConfigCache: new Map(),
+        workspaceScanCache: createWorkspaceScanCache(),
 
         lastVtslsDiagnosticsAt: new Map(),
         pendingVueDiagnosticNudges: new Map(),

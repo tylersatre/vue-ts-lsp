@@ -22,6 +22,14 @@ export function resolveVueTypescriptPluginLocation(): string {
     return path.dirname(entryPoint)
 }
 
+const TSSERVER_LOG_LEVELS = new Set(['off', 'terse', 'normal', 'requestTime', 'verbose'])
+
+/** tsserver log files are pure overhead for end users; opt in via env when debugging. */
+function tsserverLogLevel(): string {
+    const requested = process.env['VUE_TS_LSP_TSSERVER_LOG']
+    return requested !== undefined && TSSERVER_LOG_LEVELS.has(requested) ? requested : 'off'
+}
+
 export function buildVtslsSettings(vueTypescriptPluginLocation: string) {
     return {
         vtsls: {
@@ -41,7 +49,7 @@ export function buildVtslsSettings(vueTypescriptPluginLocation: string) {
         typescript: {
             tsserver: {
                 maxTsServerMemory: 8192,
-                log: 'verbose'
+                log: tsserverLogLevel()
             }
         }
     }

@@ -22,7 +22,7 @@ import {
     summarizeMethodResult,
     maybeLogVueTsWarmup
 } from './proxy-communication.js'
-import { getDocumentText } from './proxy-workspace.js'
+import { getDocumentText, invalidateWorkspaceCachesForUri, invalidateWorkspaceFileListCaches } from './proxy-workspace.js'
 import {
     forwardDiagnosticsUpstream,
     resolveDiagnosticsVersion,
@@ -165,6 +165,7 @@ export function setupTsserverRequestHandler(ctx: ProxyContext, conn: MessageConn
 /** Sends didOpen to the servers responsible for the document and records it in the store. */
 export function openDocumentOnServers(ctx: ProxyContext, uri: string, languageId: string, version: number, text: string): void {
     ctx.documentStore.open(uri, languageId, version, text)
+    invalidateWorkspaceCachesForUri(ctx, uri)
     const params = { textDocument: { uri, languageId, version, text } }
     safeSendNotification(ctx.currentVtsls, 'textDocument/didOpen', params)
     if (isVueUri(uri)) {
@@ -230,6 +231,9 @@ export function setupDocumentLifecycleHandlers(ctx: ProxyContext): void {
             }
         }
         const { uri, languageId, version, text } = didOpenParams.textDocument
+        // The opened file may be new on disk, so cached workspace listings are suspect.
+        invalidateWorkspaceCachesForUri(ctx, uri)
+        invalidateWorkspaceFileListCaches(ctx)
 
         const existing = ctx.documentStore.get(uri)
         if (existing !== undefined) {
@@ -275,6 +279,7 @@ export function setupDocumentLifecycleHandlers(ctx: ProxyContext): void {
             contentChanges: ContentChange[]
         }
         const { uri, version } = didChangeParams.textDocument
+        invalidateWorkspaceCachesForUri(ctx, uri)
         const documentBeforeChange = ctx.documentStore.get(uri)
 
         if (documentBeforeChange === undefined) {
@@ -323,6 +328,7 @@ export function setupDocumentLifecycleHandlers(ctx: ProxyContext): void {
         const didCloseParams = params as { textDocument: { uri: string } }
         const { uri } = didCloseParams.textDocument
         ctx.documentStore.close(uri)
+        invalidateWorkspaceCachesForUri(ctx, uri)
         ctx.diagnosticsStore.remove(uri)
         ctx.lastVtslsDiagnosticsAt.delete(uri)
         clearVueDiagnosticsNudge(ctx, uri)
@@ -340,6 +346,8 @@ export function setupDocumentLifecycleHandlers(ctx: ProxyContext): void {
     ctx.upstream.onNotification('textDocument/didSave', (params: unknown) => {
         const didSaveParams = params as { textDocument: { uri: string } }
         const { uri } = didSaveParams.textDocument
+        // Disk content changed; any cached disk read for this URI is stale.
+        invalidateWorkspaceCachesForUri(ctx, uri)
         safeSendNotification(ctx.currentVtsls, 'textDocument/didSave', params)
         if (isVueUri(uri)) {
             safeSendNotification(ctx.currentVueLs, 'textDocument/didSave', params)

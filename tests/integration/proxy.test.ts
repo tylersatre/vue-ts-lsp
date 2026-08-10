@@ -3944,7 +3944,7 @@ describe('workspace/configuration handling', () => {
             expect.objectContaining({
                 tsserver: expect.objectContaining({
                     maxTsServerMemory: 8192,
-                    log: 'verbose'
+                    log: 'off'
                 })
             })
         )
