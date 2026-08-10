@@ -31,11 +31,16 @@ export function initFileLogging(filePath?: string): void {
     })
 }
 
-export function closeFileLogging(): void {
-    if (fileStream !== null) {
-        fileStream.end()
-        fileStream = null
+/** Resolves once buffered entries have reached disk — await before process.exit. */
+export function closeFileLogging(): Promise<void> {
+    if (fileStream === null) {
+        return Promise.resolve()
     }
+    const stream = fileStream
+    fileStream = null
+    return new Promise((resolve) => {
+        stream.end(() => resolve())
+    })
 }
 
 function shouldLog(level: LogLevel): boolean {

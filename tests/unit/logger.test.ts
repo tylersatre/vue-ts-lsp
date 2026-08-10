@@ -244,6 +244,15 @@ describe('logger', () => {
             expect(content).not.toContain('after close')
         })
 
+        it('closeFileLogging resolves only after buffered entries reach disk', async () => {
+            initFileLogging(tmpLogFile)
+            setLogLevel('error')
+            error('proxy', 'flush me before exit')
+            await closeFileLogging()
+            const content = fs.readFileSync(tmpLogFile, 'utf-8')
+            expect(content).toContain('flush me before exit')
+        })
+
         it('does not write to stdout with file logging active', () => {
             initFileLogging(tmpLogFile)
             setLogLevel('debug')

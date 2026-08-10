@@ -146,14 +146,18 @@ export function setupProxy(
         return null
     })
 
+    function flushLogsAndExit(): void {
+        void Promise.resolve(logger.closeFileLogging()).finally(() => process.exit(0))
+    }
+
     upstream.onNotification('exit', () => {
         safeSendNotification(ctx.currentVtsls, 'exit')
         safeSendNotification(ctx.currentVueLs, 'exit')
-        process.exit(0)
+        flushLogsAndExit()
     })
 
     const shutdownOnSignal = () => {
-        void performShutdown().then(() => process.exit(0))
+        void performShutdown().then(flushLogsAndExit, flushLogsAndExit)
     }
     if (activeShutdownSignalHandler !== null) {
         process.off('SIGINT', activeShutdownSignalHandler)
@@ -162,6 +166,14 @@ export function setupProxy(
     activeShutdownSignalHandler = shutdownOnSignal
     process.on('SIGINT', shutdownOnSignal)
     process.on('SIGTERM', shutdownOnSignal)
+
+    // Claude Code dying without the shutdown/exit handshake or a signal (SIGKILL, OOM,
+    // hard crash) surfaces only as stdin closing. Without this, the proxy would run
+    // forever with two live, memory-heavy child servers.
+    upstream.onClose(() => {
+        logger.warn('proxy', 'upstream connection closed without shutdown handshake; stopping child servers')
+        shutdownOnSignal()
+    })
 
     return ctx.documentStore
 }

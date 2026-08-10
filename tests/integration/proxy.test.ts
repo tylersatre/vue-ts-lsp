@@ -20,7 +20,8 @@ vi.mock('@src/logger.js', () => ({
     warn: vi.fn(),
     info: vi.fn(),
     debug: vi.fn(),
-    setLogLevel: vi.fn()
+    setLogLevel: vi.fn(),
+    closeFileLogging: vi.fn().mockResolvedValue(undefined)
 }))
 
 const { setupProxy } = await import('@src/proxy.js')
@@ -3161,7 +3162,7 @@ describe('graceful shutdown', () => {
         expect(killVueLs).toHaveBeenCalled()
     })
 
-    it('sends exit notification to both servers and calls process.exit(0)', () => {
+    it('sends exit notification to both servers and calls process.exit(0)', async () => {
         const upstream = createMockConnection()
         const vtslsConn = createMockConnection()
         const vueLsConn = createMockConnection()
@@ -3173,6 +3174,52 @@ describe('graceful shutdown', () => {
 
         expect(vtslsConn.sendNotification).toHaveBeenCalledWith('exit')
         expect(vueLsConn.sendNotification).toHaveBeenCalledWith('exit')
+
+        // exit is deferred one microtask behind the log flush
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        expect(exitSpy).toHaveBeenCalledWith(0)
+
+        exitSpy.mockRestore()
+    })
+
+    it('flushes file logging before exiting on the exit notification', async () => {
+        const upstream = createMockConnection()
+        const vtslsConn = createMockConnection()
+        const vueLsConn = createMockConnection()
+        const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+        vi.mocked(logger.closeFileLogging).mockClear()
+
+        setupProxy(upstream as unknown as MessageConnection, vtslsConn as unknown as MessageConnection, vueLsConn as unknown as MessageConnection)
+
+        upstream.triggerNotification('exit')
+        await new Promise((resolve) => setTimeout(resolve, 0))
+
+        expect(logger.closeFileLogging).toHaveBeenCalled()
+        expect(exitSpy).toHaveBeenCalledWith(0)
+
+        exitSpy.mockRestore()
+    })
+
+    it('shuts down both children, flushes logs, and exits when the upstream connection closes', async () => {
+        const upstream = createMockConnection()
+        const vtslsConn = createMockConnection()
+        const vueLsConn = createMockConnection()
+        const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+        vi.mocked(logger.closeFileLogging).mockClear()
+
+        setupProxy(upstream as unknown as MessageConnection, vtslsConn as unknown as MessageConnection, vueLsConn as unknown as MessageConnection)
+        await upstream.triggerRequest('initialize', initParams)
+        vtslsConn.sendRequest.mockResolvedValue(null)
+        vueLsConn.sendRequest.mockResolvedValue(null)
+
+        // Claude Code dying without the shutdown/exit handshake (SIGKILL, OOM, crash)
+        // surfaces here as the upstream connection closing.
+        upstream.triggerClose()
+        await new Promise((resolve) => setTimeout(resolve, 0))
+
+        expect(vtslsConn.sendRequest).toHaveBeenCalledWith('shutdown')
+        expect(vueLsConn.sendRequest).toHaveBeenCalledWith('shutdown')
+        expect(logger.closeFileLogging).toHaveBeenCalled()
         expect(exitSpy).toHaveBeenCalledWith(0)
 
         exitSpy.mockRestore()
