@@ -215,11 +215,10 @@ export function findEnclosingReferenceTargetAtPosition(uri: string, text: string
 // One TS parse serves every identifier query against the same text: the workspace
 // reference fallback asks about up to 3 identifiers per file per edit, and a fresh
 // parse per identifier was the dominant per-edit cost. Content-validated (a text
-// mismatch reparses), so staleness is impossible. Resident memory is bounded three
-// ways: per-URI eviction from document lifecycle events (proxy-workspace wires
-// deleteIdentifierIndexEntry/sweepIdentifierIndexCache in), a TTL sweep so idle
-// sessions do not retain the whole workspace's source and ranges, and a wholesale
-// clear as a hard cap.
+// mismatch reparses), so staleness is impossible. Resident memory is bounded by the
+// entry cap (the hard limit — there is no timer, so a fully idle session retains up
+// to that many entries) plus per-URI eviction and an expired-entry sweep, both wired
+// in from document lifecycle events by proxy-workspace.
 const IDENTIFIER_INDEX_CACHE_MAX_ENTRIES = 2048
 const IDENTIFIER_INDEX_CACHE_TTL_MS = 5_000
 const identifierIndexCache = new Map<string, { text: string; index: Map<string, Range[]>; cachedAt: number }>()

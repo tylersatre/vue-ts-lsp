@@ -40,7 +40,7 @@ jobs:
             # process.stdout via an alias.
             - name: Stdout safety check
               run: |
-                  if grep -rnE 'console\.[A-Za-z]+\(|process\.stdout' src/ | grep -v 'src/upstream.ts:'; then
+                  if grep -rnE 'console\.[A-Za-z]+\(|process\.stdout' src/ | grep -v 'StreamMessageWriter(process.stdout)'; then
                     echo "::error::stdout-writing call found in source — stdout is the JSON-RPC transport"
                     exit 1
                   fi

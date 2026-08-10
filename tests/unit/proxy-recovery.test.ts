@@ -217,7 +217,7 @@ describe('recoverVtsls', () => {
         )
     })
 
-    it('resets the consecutive-failure count once a recovery succeeds', async () => {
+    it('a failed attempt below the cap does not poison later recoveries', async () => {
         const { ctx, recoveredConn, spawnVtsls } = createVtslsRecoveryContext({ maxRestarts: 2, windowMs: 1 })
         const healthyConn = createMockConnection()
         recoveredConn.sendRequest.mockRejectedValue(new Error('initialize failed'))
@@ -227,11 +227,38 @@ describe('recoverVtsls', () => {
         await new Promise((resolve) => setTimeout(resolve, 20))
         expect(ctx.currentVtsls).toBe(healthyConn)
 
-        // A later crash starts from a clean slate: the earlier failure must not count.
         const nextConn = createMockConnection()
         spawnVtsls.mockReturnValue({ conn: nextConn, kill: vi.fn() })
         await recoverVtsls(ctx, 'connection closed', () => {})
         expect(ctx.currentVtsls).toBe(nextConn)
+    })
+
+    it('a close caused by a forced-kill restart does not consume the crash budget', async () => {
+        // Timeout-triggered restarts kill the current child themselves; that close is
+        // the recovery's own doing and must not count toward "crashed too many times".
+        const { ctx, recoveredConn, spawnVtsls } = createVtslsRecoveryContext({ maxRestarts: 1, windowMs: 1 })
+        const replacement = createMockConnection()
+        spawnVtsls.mockReset()
+        // The published child's kill closes its connection synchronously, like a real SIGTERM would (eventually).
+        const killFirst = vi.fn(() => {
+            for (const [handler] of recoveredConn.onClose.mock.calls as Array<[() => void]>) {
+                handler()
+            }
+        })
+        spawnVtsls.mockReturnValueOnce({ conn: recoveredConn, kill: killFirst }).mockReturnValueOnce({ conn: replacement, kill: vi.fn() })
+
+        await recoverVtsls(ctx, 'connection closed', () => {})
+        expect(ctx.currentVtsls).toBe(recoveredConn)
+
+        await recoverVtsls(ctx, 'request timeout: textDocument/definition', () => {}, true)
+        await new Promise((resolve) => setTimeout(resolve, 20))
+
+        expect(ctx.currentVtsls).toBe(replacement)
+        expect(ctx.vtslsConsecutiveRecoveryFailures).toBe(0)
+        expect((ctx.upstream as unknown as MockConnection).sendNotification).not.toHaveBeenCalledWith(
+            'window/showMessage',
+            expect.objectContaining({ message: expect.stringContaining('crashed too many times') })
+        )
     })
 
     it('schedules another attempt after a failed recovery instead of dead-ending', async () => {

@@ -33,6 +33,10 @@ describe('ci workflow', () => {
     it('runs the broadened stdout guard (not just console.log)', () => {
         const workflow = fs.readFileSync(CI_WORKFLOW_PATH, 'utf8')
         expect(workflow).toContain(STDOUT_GUARD_PATTERN)
+        // The exclusion must stay line-scoped: excluding the whole upstream.ts file
+        // would whitelist debug prints in the module that owns the stdout transport.
+        expect(workflow).toContain("grep -v 'StreamMessageWriter(process.stdout)'")
+        expect(workflow).not.toContain("grep -v 'src/upstream.ts")
     })
 
     it('runs format:check', () => {

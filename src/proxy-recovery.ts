@@ -131,15 +131,19 @@ function recoverServer(
             return
         }
 
-        if (forceKill) {
-            spec.killCurrent(ctx)
-        }
-
         // The dead server's stored diagnostics are stale; drop them so .vue merges
         // don't blend pre-crash entries with the other server's fresh publishes.
         ctx.diagnosticsStore.clearServer(spec.server)
 
         await new Promise<void>((resolve) => setTimeout(resolve, ctx.delayMs))
+
+        if (forceKill) {
+            // Runs after the first await, i.e. with the recovery promise already
+            // published — the killed child's onClose can then tell this self-inflicted
+            // close apart from a spontaneous crash and leave the budget alone.
+            spec.killCurrent(ctx)
+        }
+
         await spec.beforeSpawn?.(ctx)
 
         const spawned = spec.spawn(ctx)
@@ -209,10 +213,15 @@ function recoverServer(
         // child that dies shortly after every recovery cannot respawn forever.
         const publishedAt = Date.now()
         setupCrashRecoveryFor(spec, ctx, spawned.conn, (r, fk) => {
-            if (Date.now() - publishedAt >= ctx.recoveryStabilityWindowMs) {
-                spec.setConsecutiveFailures(ctx, 0)
-            } else {
-                spec.setConsecutiveFailures(ctx, spec.getConsecutiveFailures(ctx) + 1)
+            // Only spontaneous closes count toward the budget: a close provoked by an
+            // in-flight forced restart (timeout recovery killing the current child) is
+            // the recovery's own doing, not a crash.
+            if (spec.getRecoveryPromise(ctx) === null) {
+                if (Date.now() - publishedAt >= ctx.recoveryStabilityWindowMs) {
+                    spec.setConsecutiveFailures(ctx, 0)
+                } else {
+                    spec.setConsecutiveFailures(ctx, spec.getConsecutiveFailures(ctx) + 1)
+                }
             }
             return recoverServer(spec, ctx, r, setupHandlers, fk ?? false)
         })

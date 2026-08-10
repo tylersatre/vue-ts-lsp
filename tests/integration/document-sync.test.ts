@@ -1156,7 +1156,13 @@ describe('document synchronization forwarding', () => {
             })
             await vi.advanceTimersByTimeAsync(4000)
 
-            expect(vtslsConn.sendRequest.mock.calls.filter(([method]) => method === 'workspace/executeCommand').length).toBeGreaterThan(0)
+            const geterrNudges = vtslsConn.sendRequest.mock.calls.filter(
+                ([method, params]) =>
+                    method === 'workspace/executeCommand' &&
+                    Array.isArray((params as { arguments?: unknown[] }).arguments) &&
+                    (params as { arguments: unknown[] }).arguments[0] === 'geterr'
+            )
+            expect(geterrNudges.length).toBeGreaterThan(0)
         } finally {
             vi.useRealTimers()
         }
