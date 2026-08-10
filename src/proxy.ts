@@ -141,7 +141,12 @@ export function setupProxy(
         await Promise.all([shutdownServer(ctx.currentVtsls, ctx.currentKillVtsls, 'vtsls'), shutdownServer(ctx.currentVueLs, ctx.currentKillVueLs, 'vue_ls')])
     }
 
+    // The child shutdown sequence must run at most once, whichever path triggers it
+    // first — the LSP shutdown request, a signal, or the upstream connection closing.
+    let shutdownStarted = false
+
     upstream.onRequest('shutdown', async () => {
+        shutdownStarted = true
         await performShutdown()
         return null
     })
@@ -156,10 +161,11 @@ export function setupProxy(
         flushLogsAndExit()
     })
 
-    // SIGTERM and stdin EOF often arrive together; run the child shutdown only once.
-    let shutdownStarted = false
     const shutdownOnSignal = () => {
         if (shutdownStarted) {
+            // Children are already being shut down (or a second signal arrived
+            // mid-shutdown — treat it as a force quit): just flush and go.
+            flushLogsAndExit()
             return
         }
         shutdownStarted = true

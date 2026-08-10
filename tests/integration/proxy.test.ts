@@ -3230,6 +3230,30 @@ describe('graceful shutdown', () => {
         exitSpy.mockRestore()
     })
 
+    it('does not re-run child shutdown when the upstream closes after the LSP shutdown request', async () => {
+        const upstream = createMockConnection()
+        const vtslsConn = createMockConnection()
+        const vueLsConn = createMockConnection()
+        const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+
+        setupProxy(upstream as unknown as MessageConnection, vtslsConn as unknown as MessageConnection, vueLsConn as unknown as MessageConnection)
+        await upstream.triggerRequest('initialize', initParams)
+        vtslsConn.sendRequest.mockResolvedValue(null)
+        vueLsConn.sendRequest.mockResolvedValue(null)
+
+        await upstream.triggerRequest('shutdown')
+        const shutdownCalls = () => vtslsConn.sendRequest.mock.calls.filter(([method]) => method === 'shutdown').length
+        expect(shutdownCalls()).toBe(1)
+
+        upstream.triggerClose()
+        await new Promise((resolve) => setTimeout(resolve, 0))
+
+        expect(shutdownCalls()).toBe(1)
+        expect(exitSpy).toHaveBeenCalledWith(0)
+
+        exitSpy.mockRestore()
+    })
+
     it('shuts down both children, flushes logs, and exits when the upstream connection closes', async () => {
         const upstream = createMockConnection()
         const vtslsConn = createMockConnection()

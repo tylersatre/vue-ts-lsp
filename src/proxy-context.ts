@@ -31,6 +31,10 @@ export interface ProxyContext {
     vueLsRetry: RetryTracker
     vtslsRecoveryPromise: Promise<void> | null
     vueLsRecoveryPromise: Promise<void> | null
+    // Wall-clock-independent bound on self-scheduled recovery retries: the sliding
+    // RetryTracker window can't stop a chain whose attempts each outlast it.
+    vtslsConsecutiveRecoveryFailures: number
+    vueLsConsecutiveRecoveryFailures: number
 
     // Stores
     documentStore: DocumentStore
@@ -83,6 +87,8 @@ export function createProxyContext(
         vueLsRetry: new RetryTracker(crashOptions?.maxRestarts, crashOptions?.windowMs),
         vtslsRecoveryPromise: null,
         vueLsRecoveryPromise: null,
+        vtslsConsecutiveRecoveryFailures: 0,
+        vueLsConsecutiveRecoveryFailures: 0,
 
         documentStore: new DocumentStore(),
         diagnosticsStore: new DiagnosticsStore(),

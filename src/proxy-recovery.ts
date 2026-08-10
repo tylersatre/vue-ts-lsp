@@ -15,6 +15,8 @@ interface RecoverySpec {
     getRetry: (ctx: ProxyContext) => ProxyContext['vtslsRetry']
     getRecoveryPromise: (ctx: ProxyContext) => Promise<void> | null
     setRecoveryPromise: (ctx: ProxyContext, promise: Promise<void> | null) => void
+    getConsecutiveFailures: (ctx: ProxyContext) => number
+    setConsecutiveFailures: (ctx: ProxyContext, count: number) => void
     getCurrentConn: (ctx: ProxyContext) => MessageConnection
     killCurrent: (ctx: ProxyContext) => void
     publish: (ctx: ProxyContext, conn: MessageConnection, kill: (() => void) | undefined) => void
@@ -34,6 +36,10 @@ const VTSLS_SPEC: RecoverySpec = {
     getRecoveryPromise: (ctx) => ctx.vtslsRecoveryPromise,
     setRecoveryPromise: (ctx, promise) => {
         ctx.vtslsRecoveryPromise = promise
+    },
+    getConsecutiveFailures: (ctx) => ctx.vtslsConsecutiveRecoveryFailures,
+    setConsecutiveFailures: (ctx, count) => {
+        ctx.vtslsConsecutiveRecoveryFailures = count
     },
     getCurrentConn: (ctx) => ctx.currentVtsls,
     killCurrent: (ctx) => ctx.currentKillVtsls?.(),
@@ -58,6 +64,10 @@ const VUE_LS_SPEC: RecoverySpec = {
     getRecoveryPromise: (ctx) => ctx.vueLsRecoveryPromise,
     setRecoveryPromise: (ctx, promise) => {
         ctx.vueLsRecoveryPromise = promise
+    },
+    getConsecutiveFailures: (ctx) => ctx.vueLsConsecutiveRecoveryFailures,
+    setConsecutiveFailures: (ctx, count) => {
+        ctx.vueLsConsecutiveRecoveryFailures = count
     },
     getCurrentConn: (ctx) => ctx.currentVueLs,
     killCurrent: (ctx) => ctx.currentKillVueLs?.(),
@@ -156,14 +166,28 @@ function recoverServer(
         } catch (err: unknown) {
             // The replacement never became usable; kill it and keep the old connection
             // published. The old connection's onClose has already fired, so nothing
-            // external will trigger another attempt — schedule one ourselves and let
-            // the retry cap decide when to give up.
+            // external will trigger another attempt — schedule one ourselves.
+            //
+            // RetryTracker's sliding window cannot bound this chain (attempts that
+            // outlast windowMs/maxRestarts never accumulate), so a consecutive-failure
+            // counter provides a wall-clock-independent stop.
             spawned.kill?.()
-            setTimeout(() => {
-                recoverServer(spec, ctx, `retry after failed recovery: ${String(err)}`, setupHandlers, false).catch((retryErr: unknown) => {
-                    logger.error('proxy', `${spec.server} recovery retry error: ${String(retryErr)}`)
+            spawned.conn.dispose()
+            const failures = spec.getConsecutiveFailures(ctx) + 1
+            spec.setConsecutiveFailures(ctx, failures)
+            if (failures >= retry.maxRestarts) {
+                logger.error('proxy', `${spec.server}: ${failures} consecutive failed recovery attempts; giving up`)
+                safeSendNotification(ctx.upstream, 'window/showMessage', {
+                    type: 1,
+                    message: spec.crashMessage
                 })
-            }, ctx.delayMs)
+            } else {
+                setTimeout(() => {
+                    recoverServer(spec, ctx, `retry after failed recovery: ${String(err)}`, setupHandlers, false).catch((retryErr: unknown) => {
+                        logger.error('proxy', `${spec.server} recovery retry error: ${String(retryErr)}`)
+                    })
+                }, ctx.delayMs)
+            }
             throw err
         }
 
@@ -172,6 +196,7 @@ function recoverServer(
         // connection. A didChange sent to an uninitialized child is a protocol
         // violation that can re-crash it, and a didOpen would be duplicated by replay.
         spec.publish(ctx, spawned.conn, spawned.kill)
+        spec.setConsecutiveFailures(ctx, 0)
 
         logger.info('proxy', `${spec.server} restarted successfully`)
         setupCrashRecoveryFor(spec, ctx, spawned.conn, (r, fk) => recoverServer(spec, ctx, r, setupHandlers, fk ?? false))

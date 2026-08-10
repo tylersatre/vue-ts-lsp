@@ -50,7 +50,7 @@ const SAVED_INIT_PARAMS = {
     capabilities: {}
 }
 
-function createVtslsRecoveryContext(options?: { maxRestarts?: number; recoveredConn?: MockConnection; killVtsls?: () => void }): {
+function createVtslsRecoveryContext(options?: { maxRestarts?: number; windowMs?: number; recoveredConn?: MockConnection; killVtsls?: () => void }): {
     ctx: ProxyContext
     oldVtsls: MockConnection
     recoveredConn: MockConnection
@@ -72,7 +72,8 @@ function createVtslsRecoveryContext(options?: { maxRestarts?: number; recoveredC
             spawnVtsls: () => spawnVtsls() as { conn: MessageConnection; kill: () => void },
             killVtsls: options?.killVtsls,
             delayMs: 0,
-            maxRestarts: options?.maxRestarts
+            maxRestarts: options?.maxRestarts,
+            windowMs: options?.windowMs
         }
     )
     ctx.savedInitParams = SAVED_INIT_PARAMS
@@ -180,14 +181,50 @@ describe('recoverVtsls', () => {
         )
     })
 
-    it('kills the spawned child and leaves the old connection published when initialize fails', async () => {
-        const { ctx, oldVtsls, recoveredConn, spawnedKill } = createVtslsRecoveryContext()
+    it('kills and disposes the spawned child, leaving the old connection published, when initialize fails', async () => {
+        const { ctx, oldVtsls, recoveredConn, spawnedKill } = createVtslsRecoveryContext({ maxRestarts: 1 })
         recoveredConn.sendRequest.mockRejectedValue(new Error('initialize failed'))
 
         await expect(recoverVtsls(ctx, 'connection closed', () => {})).rejects.toThrow('initialize failed')
 
         expect(ctx.currentVtsls).toBe(oldVtsls)
         expect(spawnedKill).toHaveBeenCalled()
+        expect(recoveredConn.dispose).toHaveBeenCalled()
+    })
+
+    it('gives up after consecutive failed attempts even when the retry window has slid', async () => {
+        // RetryTracker's 30s sliding window cannot bound a chain whose attempts each
+        // take longer than windowMs/maxRestarts — timestamps expire before the cap
+        // trips. windowMs: 1 makes the window useless here on purpose: only the
+        // consecutive-failure bound can stop the chain.
+        const { ctx, recoveredConn, spawnVtsls } = createVtslsRecoveryContext({ maxRestarts: 2, windowMs: 1 })
+        recoveredConn.sendRequest.mockRejectedValue(new Error('initialize failed'))
+
+        await expect(recoverVtsls(ctx, 'connection closed', () => {})).rejects.toThrow('initialize failed')
+        await new Promise((resolve) => setTimeout(resolve, 50))
+
+        expect(spawnVtsls).toHaveBeenCalledTimes(2)
+        expect((ctx.upstream as unknown as MockConnection).sendNotification).toHaveBeenCalledWith(
+            'window/showMessage',
+            expect.objectContaining({ message: expect.stringContaining('crashed too many times') })
+        )
+    })
+
+    it('resets the consecutive-failure count once a recovery succeeds', async () => {
+        const { ctx, recoveredConn, spawnVtsls } = createVtslsRecoveryContext({ maxRestarts: 2, windowMs: 1 })
+        const healthyConn = createMockConnection()
+        recoveredConn.sendRequest.mockRejectedValue(new Error('initialize failed'))
+        spawnVtsls.mockReturnValueOnce({ conn: recoveredConn, kill: vi.fn() }).mockReturnValue({ conn: healthyConn, kill: vi.fn() })
+
+        await expect(recoverVtsls(ctx, 'connection closed', () => {})).rejects.toThrow('initialize failed')
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        expect(ctx.currentVtsls).toBe(healthyConn)
+
+        // A later crash starts from a clean slate: the earlier failure must not count.
+        const nextConn = createMockConnection()
+        spawnVtsls.mockReturnValue({ conn: nextConn, kill: vi.fn() })
+        await recoverVtsls(ctx, 'connection closed', () => {})
+        expect(ctx.currentVtsls).toBe(nextConn)
     })
 
     it('schedules another attempt after a failed recovery instead of dead-ending', async () => {
