@@ -2035,6 +2035,36 @@ describe('document lifecycle self-healing', () => {
 
         expect(vtslsConn.sendNotification).not.toHaveBeenCalledWith('textDocument/didOpen', expect.anything())
     })
+
+    it('opens an on-disk document before serving a pull-diagnostics request for it', async () => {
+        const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'self-heal-pull-'))
+        const filePath = path.join(workDir, 'orphan.ts')
+        fs.writeFileSync(filePath, 'export const fromDisk = 1;')
+        const uri = pathToFileURL(filePath).href
+        try {
+            vtslsConn.sendRequest.mockResolvedValue({ body: [] })
+
+            await upstream.triggerRequest('textDocument/diagnostic', {
+                textDocument: { uri }
+            })
+
+            expect(vtslsConn.sendNotification).toHaveBeenCalledWith('textDocument/didOpen', {
+                textDocument: {
+                    uri,
+                    languageId: 'typescript',
+                    version: 1,
+                    text: 'export const fromDisk = 1;'
+                }
+            })
+            const openIndex = vtslsConn.sendNotification.mock.calls.findIndex(([method]) => method === 'textDocument/didOpen')
+            const diagIndex = vtslsConn.sendRequest.mock.calls.findIndex(([method]) => method === 'workspace/executeCommand')
+            expect(openIndex).toBeGreaterThanOrEqual(0)
+            expect(diagIndex).toBeGreaterThanOrEqual(0)
+            expect(vtslsConn.sendNotification.mock.invocationCallOrder[openIndex]!).toBeLessThan(vtslsConn.sendRequest.mock.invocationCallOrder[diagIndex]!)
+        } finally {
+            fs.rmSync(workDir, { recursive: true, force: true })
+        }
+    })
 })
 
 describe('LSP request forwarding', () => {

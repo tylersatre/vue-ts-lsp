@@ -406,6 +406,7 @@ export function setupPullDiagnosticHandler(ctx: ProxyContext): void {
         if (uri === null || (!isVueUri(uri) && !isScriptLikeUri(uri))) {
             return { kind: 'full', items: [] }
         }
+        ensureRequestDocumentOpen(ctx, uri)
 
         const file = uriToFilePath(uri)
         if (file === null) {
