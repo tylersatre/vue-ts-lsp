@@ -22,7 +22,7 @@ import {
     summarizeMethodResult,
     maybeLogVueTsWarmup
 } from './proxy-communication.js'
-import { getDocumentText, invalidateWorkspaceCachesForUri, invalidateWorkspaceFileListCaches } from './proxy-workspace.js'
+import { getDocumentText, invalidateWorkspaceCachesForUri } from './proxy-workspace.js'
 import {
     forwardDiagnosticsUpstream,
     resolveDiagnosticsVersion,
@@ -231,9 +231,7 @@ export function setupDocumentLifecycleHandlers(ctx: ProxyContext): void {
             }
         }
         const { uri, languageId, version, text } = didOpenParams.textDocument
-        // The opened file may be new on disk, so cached workspace listings are suspect.
         invalidateWorkspaceCachesForUri(ctx, uri)
-        invalidateWorkspaceFileListCaches(ctx)
 
         const existing = ctx.documentStore.get(uri)
         if (existing !== undefined) {

@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import type { MessageConnection } from 'vscode-jsonrpc/node'
 import type { InitializeParams, Position, Range } from 'vscode-languageserver-protocol'
 import { computeDocumentEnd } from './documents.js'
+import * as logger from './logger.js'
 import type {
     ContentChange,
     LspLocation,
@@ -22,12 +23,21 @@ export function resolveVueTypescriptPluginLocation(): string {
     return path.dirname(entryPoint)
 }
 
-const TSSERVER_LOG_LEVELS = new Set(['off', 'terse', 'normal', 'requestTime', 'verbose'])
+// 'requestTime' is deliberately absent: vtsls lowercases the value before comparing
+// against the literal 'requestTime', so it can never match and silently means 'off'.
+const TSSERVER_LOG_LEVELS = new Set(['off', 'terse', 'normal', 'verbose'])
 
 /** tsserver log files are pure overhead for end users; opt in via env when debugging. */
 function tsserverLogLevel(): string {
     const requested = process.env['VUE_TS_LSP_TSSERVER_LOG']
-    return requested !== undefined && TSSERVER_LOG_LEVELS.has(requested) ? requested : 'off'
+    if (requested === undefined || requested === '') {
+        return 'off'
+    }
+    if (!TSSERVER_LOG_LEVELS.has(requested)) {
+        logger.warn('proxy', `VUE_TS_LSP_TSSERVER_LOG=${requested} is not one of off/terse/normal/verbose; using off`)
+        return 'off'
+    }
+    return requested
 }
 
 export function buildVtslsSettings(vueTypescriptPluginLocation: string) {

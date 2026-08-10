@@ -111,7 +111,7 @@ function buildVtslsSettings(pluginLocation: string) {
         typescript: {
             tsserver: {
                 maxTsServerMemory: 8192,
-                log: 'verbose'
+                log: 'off'
             }
         }
     }

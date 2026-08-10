@@ -44,15 +44,31 @@ function readCacheEntry<T>(cache: Map<string, T & { cachedAt: number }>, key: st
     return entry
 }
 
-/** A content edit anywhere can rewire the import graph, so importer results always reset. */
+// Bounds resident memory, not correctness: one nudge cycle can read the whole
+// workspace, and nothing else evicts entries in an idle session.
+const WORKSPACE_TEXT_CACHE_MAX_ENTRIES = 4096
+
+function sweepExpiredEntries(cache: Map<string, { cachedAt: number }>): void {
+    const now = Date.now()
+    for (const [key, entry] of cache) {
+        if (now - entry.cachedAt > WORKSPACE_SCAN_CACHE_TTL_MS) {
+            cache.delete(key)
+        }
+    }
+}
+
+/**
+ * Runs on every document lifecycle event. A content edit anywhere can rewire the
+ * import graph, so importer results always reset; the file listing resets too because
+ * agents create files on disk without a didOpen (the next lifecycle event is the only
+ * signal that the directory contents may have changed). Expired text entries are swept
+ * here so idle sessions don't retain the whole workspace's source.
+ */
 export function invalidateWorkspaceCachesForUri(ctx: ProxyContext, uri: string): void {
     ctx.workspaceScanCache.fileTexts.delete(uri)
     ctx.workspaceScanCache.importerUris.clear()
-}
-
-export function invalidateWorkspaceFileListCaches(ctx: ProxyContext): void {
     ctx.workspaceScanCache.fileLists.clear()
-    ctx.workspaceScanCache.importerUris.clear()
+    sweepExpiredEntries(ctx.workspaceScanCache.fileTexts)
 }
 
 export function clearWorkspaceScanCaches(ctx: ProxyContext): void {
@@ -288,6 +304,12 @@ export function getDocumentText(ctx: ProxyContext, uri: string): string | null {
         text = fs.readFileSync(filePath, 'utf8')
     } catch {
         text = null
+    }
+    if (ctx.workspaceScanCache.fileTexts.size >= WORKSPACE_TEXT_CACHE_MAX_ENTRIES) {
+        sweepExpiredEntries(ctx.workspaceScanCache.fileTexts)
+        if (ctx.workspaceScanCache.fileTexts.size >= WORKSPACE_TEXT_CACHE_MAX_ENTRIES) {
+            ctx.workspaceScanCache.fileTexts.clear()
+        }
     }
     ctx.workspaceScanCache.fileTexts.set(uri, { text, cachedAt: Date.now() })
     return text

@@ -212,6 +212,47 @@ export function findEnclosingReferenceTargetAtPosition(uri: string, text: string
     return best
 }
 
+// One TS parse serves every identifier query against the same text: the workspace
+// reference fallback asks about up to 3 identifiers per file per edit, and a fresh
+// parse per identifier was the dominant per-edit cost. Content-validated (a text
+// mismatch reparses), so staleness is impossible; bounded by wholesale clear.
+const IDENTIFIER_INDEX_CACHE_MAX_ENTRIES = 2048
+const identifierIndexCache = new Map<string, { text: string; index: Map<string, Range[]> }>()
+
+export function getIdentifierIndex(uri: string, text: string): Map<string, Range[]> {
+    const cached = identifierIndexCache.get(uri)
+    if (cached !== undefined && cached.text === text) {
+        return cached.index
+    }
+
+    const index = new Map<string, Range[]>()
+    for (const target of collectParseTargets(uri, text)) {
+        const sourceFile = ts.createSourceFile(target.filename, target.content, ts.ScriptTarget.Latest, true, target.scriptKind)
+
+        const visit = (node: ts.Node): void => {
+            if (ts.isIdentifier(node)) {
+                const start = target.contentStart + node.getStart(sourceFile)
+                const end = target.contentStart + node.getEnd()
+                const ranges = index.get(node.text)
+                if (ranges === undefined) {
+                    index.set(node.text, [offsetsToRange(text, start, end)])
+                } else {
+                    ranges.push(offsetsToRange(text, start, end))
+                }
+            }
+            ts.forEachChild(node, visit)
+        }
+
+        visit(sourceFile)
+    }
+
+    if (identifierIndexCache.size >= IDENTIFIER_INDEX_CACHE_MAX_ENTRIES) {
+        identifierIndexCache.clear()
+    }
+    identifierIndexCache.set(uri, { text, index })
+    return index
+}
+
 export function collectIdentifierReferencesInDocument(uri: string, text: string, identifier: string): Array<{ uri: string; range: Range }> {
     const locations: Array<{ uri: string; range: Range }> = []
     const seen = new Set<string>()
@@ -225,19 +266,8 @@ export function collectIdentifierReferencesInDocument(uri: string, text: string,
         locations.push({ uri, range })
     }
 
-    for (const target of collectParseTargets(uri, text)) {
-        const sourceFile = ts.createSourceFile(target.filename, target.content, ts.ScriptTarget.Latest, true, target.scriptKind)
-
-        const visit = (node: ts.Node): void => {
-            if (ts.isIdentifier(node) && node.text === identifier) {
-                const start = target.contentStart + node.getStart(sourceFile)
-                const end = target.contentStart + node.getEnd()
-                pushLocation(offsetsToRange(text, start, end))
-            }
-            ts.forEachChild(node, visit)
-        }
-
-        visit(sourceFile)
+    for (const range of getIdentifierIndex(uri, text).get(identifier) ?? []) {
+        pushLocation(range)
     }
 
     if (getExtension(uri) === '.vue') {

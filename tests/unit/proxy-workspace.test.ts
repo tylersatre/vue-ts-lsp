@@ -196,6 +196,35 @@ describe('workspace scan caching', () => {
             expect(listWorkspaceSourceFiles(ctx, workDir).map((f) => path.basename(f))).toContain('brand-new.ts')
         })
 
+        it('didChange makes a file created on disk without a didOpen visible to scans', () => {
+            // Agents write new files with no didOpen; the next edit event must not
+            // leave scans running against a stale directory listing for the TTL.
+            setupDocumentLifecycleHandlers(ctx)
+            const editedUri = pathToFileURL(path.join(workDir, 'importer.ts')).href
+            listWorkspaceSourceFiles(ctx, workDir)
+
+            fs.writeFileSync(path.join(workDir, 'agent-created.ts'), 'export const created = 1;\n')
+            upstream.triggerNotification('textDocument/didChange', {
+                textDocument: { uri: editedUri, version: 2 },
+                contentChanges: [{ text: "import { target } from './target';\nexport const use = target;\n" }]
+            })
+
+            expect(listWorkspaceSourceFiles(ctx, workDir).map((f) => path.basename(f))).toContain('agent-created.ts')
+        })
+
+        it('bounds the disk-text cache and drops expired entries on invalidation', () => {
+            vi.useFakeTimers({ now: Date.now() })
+            const uri = pathToFileURL(path.join(workDir, 'target.ts')).href
+            getDocumentText(ctx, uri)
+            expect(ctx.workspaceScanCache.fileTexts.has(uri)).toBe(true)
+
+            // Entries past the TTL are swept when any lifecycle invalidation runs, so
+            // an idle session doesn't retain the whole workspace's text forever.
+            vi.advanceTimersByTime(60_000)
+            invalidateWorkspaceCachesForUri(ctx, 'file:///unrelated.ts')
+            expect(ctx.workspaceScanCache.fileTexts.has(uri)).toBe(false)
+        })
+
         it('didSave and didClose invalidate the saved document text', () => {
             setupDocumentLifecycleHandlers(ctx)
             const uri = pathToFileURL(path.join(workDir, 'target.ts')).href

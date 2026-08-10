@@ -30,10 +30,14 @@ describe('buildVtslsSettings tsserver logging', () => {
     })
 
     it('accepts the other tsserver log levels', () => {
-        for (const level of ['off', 'terse', 'normal', 'requestTime', 'verbose']) {
+        // 'requestTime' is intentionally rejected: vtsls lowercases the value before
+        // matching, so 'requestTime' silently behaves as 'off' downstream.
+        for (const level of ['off', 'terse', 'normal', 'verbose']) {
             process.env['VUE_TS_LSP_TSSERVER_LOG'] = level
             expect(tsserverLogSetting(buildVtslsSettings('/plugin'))).toBe(level)
         }
+        process.env['VUE_TS_LSP_TSSERVER_LOG'] = 'requestTime'
+        expect(tsserverLogSetting(buildVtslsSettings('/plugin'))).toBe('off')
     })
 
     it('falls back to off for invalid values', () => {
