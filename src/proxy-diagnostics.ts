@@ -2,6 +2,7 @@ import type { Position } from 'vscode-languageserver-protocol'
 import type { ProxyContext } from './proxy-context.js'
 import type { ContentChange, LspLocation } from './proxy-types.js'
 import {
+    type DiagnosticNudgeChannel,
     VUE_DIAGNOSTIC_NUDGE_DELAY_MS,
     SCRIPT_DIAGNOSTIC_NUDGE_DELAY_MS,
     SCRIPT_DEPENDENT_DIAGNOSTIC_NUDGE_DELAY_MS,
@@ -9,7 +10,13 @@ import {
     SCRIPT_DEPENDENT_DIAGNOSTIC_FILE_LIMIT,
     VTSLS_BACKGROUND_REQUEST_TIMEOUT_MS
 } from './proxy-types.js'
-import { executeTsserverCommand, enqueueVtslsBackgroundCommand, safeSendNotification, sendDownstreamRequest, sendTsserverCommand } from './proxy-communication.js'
+import {
+    executeTsserverCommand,
+    enqueueVtslsBackgroundCommand,
+    safeSendNotification,
+    sendDownstreamRequest,
+    sendTsserverCommand
+} from './proxy-communication.js'
 import { getDocumentText, collectWorkspaceImporterUris } from './proxy-workspace.js'
 import { isVueUri, isScriptLikeUri, uriToFilePath } from './proxy-utils.js'
 import { isInternalProbeUri } from './helpers/probes.js'
@@ -93,15 +100,13 @@ export function areDiagnosticsFresh(ctx: ProxyContext, targetUris: string[], sch
     )
 }
 
-export function scheduleDiagnosticsNudge(
-    ctx: ProxyContext,
-    uri: string,
-    targetUris: string[],
-    delayMs: number,
-    reason: string,
-    pending: Map<string, ReturnType<typeof setTimeout>>,
-    queued: Set<string>
-): void {
+export function nudgeChannelState(ctx: ProxyContext, channel: DiagnosticNudgeChannel) {
+    return ctx.diagnosticNudges.get(channel)!
+}
+
+export function scheduleDiagnosticsNudge(ctx: ProxyContext, uri: string, targetUris: string[], delayMs: number, channel: DiagnosticNudgeChannel): void {
+    const { pending, queued } = nudgeChannelState(ctx, channel)
+    const reason = channel
     const files = uniqueTsserverFilesForUris(targetUris)
     if (files.length === 0 || isInternalProbeUri(uri)) {
         return
@@ -133,32 +138,24 @@ export function scheduleDiagnosticsNudge(
     pending.set(uri, timer)
 }
 
-export function clearVueDiagnosticsNudge(ctx: ProxyContext, uri: string): void {
-    clearDiagnosticsNudge(uri, ctx.pendingVueDiagnosticNudges)
-}
-
-export function clearScriptDiagnosticsNudge(ctx: ProxyContext, uri: string): void {
-    clearDiagnosticsNudge(uri, ctx.pendingScriptDiagnosticNudges)
-}
-
 export function clearScriptDependentDiagnosticsNudge(ctx: ProxyContext, uri: string): void {
-    clearDiagnosticsNudge(uri, ctx.pendingScriptDependentDiagnosticNudges)
+    clearDiagnosticsNudge(uri, nudgeChannelState(ctx, 'script-dependent').pending)
+}
+
+/** didClose cleanup: cancels the pending timer and queued marker on every channel. */
+export function clearDiagnosticNudgesForUri(ctx: ProxyContext, uri: string): void {
+    for (const { pending, queued } of ctx.diagnosticNudges.values()) {
+        clearDiagnosticsNudge(uri, pending)
+        queued.delete(uri)
+    }
 }
 
 export function scheduleVueDiagnosticsNudge(ctx: ProxyContext, uri: string): void {
-    scheduleDiagnosticsNudge(ctx, uri, [uri], VUE_DIAGNOSTIC_NUDGE_DELAY_MS, 'vue', ctx.pendingVueDiagnosticNudges, ctx.queuedVueDiagnosticNudges)
+    scheduleDiagnosticsNudge(ctx, uri, [uri], VUE_DIAGNOSTIC_NUDGE_DELAY_MS, 'vue')
 }
 
 export function scheduleScriptDiagnosticsNudge(ctx: ProxyContext, uri: string): void {
-    scheduleDiagnosticsNudge(
-        ctx,
-        uri,
-        [uri, ...collectOpenDiagnosticDocumentUris(ctx)],
-        SCRIPT_DIAGNOSTIC_NUDGE_DELAY_MS,
-        'script',
-        ctx.pendingScriptDiagnosticNudges,
-        ctx.queuedScriptDiagnosticNudges
-    )
+    scheduleDiagnosticsNudge(ctx, uri, [uri, ...collectOpenDiagnosticDocumentUris(ctx)], SCRIPT_DIAGNOSTIC_NUDGE_DELAY_MS, 'script')
 }
 
 export async function requestScriptReferenceLocationsInBackground(ctx: ProxyContext, uri: string, position: Position): Promise<LspLocation[]> {
@@ -257,13 +254,13 @@ export function scheduleScriptDependentDiagnosticsNudge(ctx: ProxyContext, uri: 
     )
 
     const timer = setTimeout(() => {
-        ctx.pendingScriptDependentDiagnosticNudges.delete(uri)
-        if (ctx.queuedScriptDependentDiagnosticNudges.has(uri)) {
+        nudgeChannelState(ctx, 'script-dependent').pending.delete(uri)
+        if (nudgeChannelState(ctx, 'script-dependent').queued.has(uri)) {
             logger.debug('proxy', `textDocument/didChange ${uri} dependent diagnostics nudge skipped reason=already-queued`)
             return
         }
 
-        ctx.queuedScriptDependentDiagnosticNudges.add(uri)
+        nudgeChannelState(ctx, 'script-dependent').queued.add(uri)
         void enqueueVtslsBackgroundCommand(ctx, `textDocument/didChange ${uri} dependent diagnostics nudge`, async () => {
             const dependentUris = await resolveScriptDependentDiagnosticTargetUris(ctx, uri, oldText, contentChanges)
             if (dependentUris.length === 0) {
@@ -293,8 +290,8 @@ export function scheduleScriptDependentDiagnosticsNudge(ctx: ProxyContext, uri: 
                 }
             )
         }).finally(() => {
-            ctx.queuedScriptDependentDiagnosticNudges.delete(uri)
+            nudgeChannelState(ctx, 'script-dependent').queued.delete(uri)
         })
     }, SCRIPT_DEPENDENT_DIAGNOSTIC_NUDGE_DELAY_MS)
-    ctx.pendingScriptDependentDiagnosticNudges.set(uri, timer)
+    nudgeChannelState(ctx, 'script-dependent').pending.set(uri, timer)
 }

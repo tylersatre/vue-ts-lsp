@@ -124,6 +124,13 @@ export const WORKSPACE_SYMBOL_TIMEOUT_MS = 5000
 export const VTSLS_BACKGROUND_IDLE_POLL_MS = 50
 export const VTSLS_BACKGROUND_IDLE_MAX_WAIT_MS = 3_000
 export const VTSLS_BACKGROUND_REQUEST_TIMEOUT_MS = 5_000
+export type DiagnosticNudgeChannel = 'vue' | 'script' | 'script-dependent'
+
+export interface DiagnosticNudgeChannelState {
+    pending: Map<string, ReturnType<typeof setTimeout>>
+    queued: Set<string>
+}
+
 export const WORKSPACE_SCAN_CACHE_TTL_MS = 5_000
 export const SCRIPT_DEPENDENT_DIAGNOSTIC_SYMBOL_LIMIT = 3
 export const SCRIPT_DEPENDENT_DIAGNOSTIC_FILE_LIMIT = 24

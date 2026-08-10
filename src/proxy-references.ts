@@ -1,24 +1,17 @@
 import { pathToFileURL } from 'node:url'
-import type { Position, Range } from 'vscode-languageserver-protocol'
+import type { Range } from 'vscode-languageserver-protocol'
 import type { ProxyContext } from './proxy-context.js'
-import type { LspLocation, CallHierarchyItemLike } from './proxy-types.js'
-import { isLocation, isPosition, isCallHierarchyItem } from './proxy-utils.js'
+import type { LspLocation } from './proxy-types.js'
+import { isLocation } from './proxy-utils.js'
 import { sendDownstreamRequest } from './proxy-communication.js'
 import { getWorkspaceRootPath, listWorkspaceSourceFiles, getDocumentText, collectWorkspaceImporterUris } from './proxy-workspace.js'
 import { isInternalProbeUri } from './helpers/probes.js'
 import { findReferenceTargetAtPosition, collectIdentifierReferencesInDocument } from './helpers/references.js'
+import { extractRequestPosition } from './helpers/identifiers.js'
 import * as logger from './logger.js'
 
-export function extractRequestPosition(params: unknown): Position | null {
-    if (params !== null && typeof params === 'object' && 'position' in params && isPosition((params as { position: unknown }).position)) {
-        return (params as { position: Position }).position
-    }
-
-    if (params !== null && typeof params === 'object' && 'item' in params && isCallHierarchyItem((params as { item: unknown }).item)) {
-        return (params as { item: CallHierarchyItemLike }).item.selectionRange.start
-    }
-
-    return null
+function locationKey(location: LspLocation): string {
+    return [location.uri, location.range.start.line, location.range.start.character, location.range.end.line, location.range.end.character].join(':')
 }
 
 export function normalizeReferenceLocations(result: unknown): LspLocation[] {
@@ -31,9 +24,7 @@ export function normalizeReferenceLocations(result: unknown): LspLocation[] {
         .filter(isLocation)
         .filter((location) => !isInternalProbeUri(location.uri))
         .filter((location) => {
-            const key = [location.uri, location.range.start.line, location.range.start.character, location.range.end.line, location.range.end.character].join(
-                ':'
-            )
+            const key = locationKey(location)
             if (seen.has(key)) {
                 return false
             }
@@ -63,6 +54,37 @@ export function isSuspiciousReferenceResult(requestUri: string, targetKind: stri
     return false
 }
 
+function collectReferencesFromUris(
+    ctx: ProxyContext,
+    uris: Iterable<string>,
+    targetName: string,
+    excludeLocation?: (uri: string, location: LspLocation) => boolean
+): LspLocation[] {
+    const results: LspLocation[] = []
+    const seen = new Set<string>()
+    for (const uri of uris) {
+        const text = getDocumentText(ctx, uri)
+        if (text === null) {
+            continue
+        }
+
+        for (const location of collectIdentifierReferencesInDocument(uri, text, targetName)) {
+            if (excludeLocation !== undefined && excludeLocation(uri, location)) {
+                continue
+            }
+
+            const key = locationKey(location)
+            if (seen.has(key)) {
+                continue
+            }
+            seen.add(key)
+            results.push(location)
+        }
+    }
+
+    return results
+}
+
 export function buildWorkspaceReferenceFallback(
     ctx: ProxyContext,
     requestUri: string,
@@ -75,68 +97,21 @@ export function buildWorkspaceReferenceFallback(
         return []
     }
 
-    const results: LspLocation[] = []
-    const seen = new Set<string>()
-    for (const filePath of listWorkspaceSourceFiles(ctx, workspaceRootPath)) {
-        const uri = pathToFileURL(filePath).href
-        const text = getDocumentText(ctx, uri)
-        if (text === null) {
-            continue
-        }
-
-        for (const location of collectIdentifierReferencesInDocument(uri, text, targetName)) {
-            const isDeclaration =
-                declarationRange !== null &&
-                uri === requestUri &&
-                location.range.start.line === declarationRange.start.line &&
-                location.range.start.character === declarationRange.start.character &&
-                location.range.end.line === declarationRange.end.line &&
-                location.range.end.character === declarationRange.end.character
-            if (!includeDeclaration && isDeclaration) {
-                continue
-            }
-
-            const key = [location.uri, location.range.start.line, location.range.start.character, location.range.end.line, location.range.end.character].join(
-                ':'
-            )
-            if (seen.has(key)) {
-                continue
-            }
-            seen.add(key)
-            results.push(location)
-        }
-    }
-
-    return results
+    const uris = listWorkspaceSourceFiles(ctx, workspaceRootPath).map((filePath) => pathToFileURL(filePath).href)
+    return collectReferencesFromUris(ctx, uris, targetName, (uri, location) => {
+        const isDeclaration =
+            declarationRange !== null &&
+            uri === requestUri &&
+            location.range.start.line === declarationRange.start.line &&
+            location.range.start.character === declarationRange.start.character &&
+            location.range.end.line === declarationRange.end.line &&
+            location.range.end.character === declarationRange.end.character
+        return !includeDeclaration && isDeclaration
+    })
 }
 
 export function buildWorkspaceImporterReferenceFallback(ctx: ProxyContext, requestUri: string, targetName: string): LspLocation[] {
-    const importerUris = collectWorkspaceImporterUris(ctx, requestUri)
-    if (importerUris.length === 0) {
-        return []
-    }
-
-    const results: LspLocation[] = []
-    const seen = new Set<string>()
-    for (const uri of importerUris) {
-        const text = getDocumentText(ctx, uri)
-        if (text === null) {
-            continue
-        }
-
-        for (const location of collectIdentifierReferencesInDocument(uri, text, targetName)) {
-            const key = [location.uri, location.range.start.line, location.range.start.character, location.range.end.line, location.range.end.character].join(
-                ':'
-            )
-            if (seen.has(key)) {
-                continue
-            }
-            seen.add(key)
-            results.push(location)
-        }
-    }
-
-    return results
+    return collectReferencesFromUris(ctx, collectWorkspaceImporterUris(ctx, requestUri), targetName)
 }
 
 export async function requestWithReferenceFallback(

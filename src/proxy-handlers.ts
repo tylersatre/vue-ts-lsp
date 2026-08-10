@@ -29,9 +29,7 @@ import {
     scheduleVueDiagnosticsNudge,
     scheduleScriptDiagnosticsNudge,
     scheduleScriptDependentDiagnosticsNudge,
-    clearVueDiagnosticsNudge,
-    clearScriptDiagnosticsNudge,
-    clearScriptDependentDiagnosticsNudge
+    clearDiagnosticNudgesForUri
 } from './proxy-diagnostics.js'
 import { requestWithVueDefinitionRetry, maybePrimeDocument } from './proxy-definitions.js'
 import { requestWithVueHoverRetry } from './proxy-hover.js'
@@ -44,64 +42,46 @@ import { isDefinitionMirrorUri } from './definition-mirrors.js'
 import { normalizeDocumentSymbolKinds } from './helpers/symbols.js'
 import { extractTsserverRequestId, parseTsserverRequest, summarizeBridgeResponseBody } from './helpers/tsserver.js'
 import { routeRequest } from './router.js'
-import type { Diagnostic } from './diagnostics.js'
+import { diagnosticKey, type Diagnostic } from './diagnostics.js'
 import * as logger from './logger.js'
 
-export function setupVtslsHandlers(ctx: ProxyContext, conn: MessageConnection): void {
+function setupDownstreamHandlers(ctx: ProxyContext, conn: MessageConnection, server: 'vtsls' | 'vue_ls'): void {
     conn.onNotification('textDocument/publishDiagnostics', (params: unknown) => {
         const p = params as { uri: string; diagnostics: Diagnostic[]; version?: unknown }
         if (isInternalProbeUri(p.uri)) {
             logger.debug('proxy', `publishDiagnostics ignored internal probe uri=${p.uri} count=${p.diagnostics.length}`)
             return
         }
-        ctx.lastVtslsDiagnosticsAt.set(p.uri, Date.now())
+        if (server === 'vtsls') {
+            ctx.lastVtslsDiagnosticsAt.set(p.uri, Date.now())
+        }
         const version = resolveDiagnosticsVersion(ctx, p.uri, p.version)
         if (isVueUri(p.uri)) {
-            const merged = ctx.diagnosticsStore.update(p.uri, 'vtsls', p.diagnostics)
-            logDiagnostics('vtsls', p.uri, p.diagnostics.length, merged.length)
+            const merged = ctx.diagnosticsStore.update(p.uri, server, p.diagnostics)
+            logDiagnostics(server, p.uri, p.diagnostics.length, merged.length)
             forwardDiagnosticsUpstream(ctx, p.uri, merged, version)
         } else {
-            logDiagnostics('vtsls', p.uri, p.diagnostics.length)
+            logDiagnostics(server, p.uri, p.diagnostics.length)
             forwardDiagnosticsUpstream(ctx, p.uri, p.diagnostics, version)
         }
     })
     conn.onNotification('window/logMessage', (params: unknown) => {
         const p = params as { type: number; message: string }
-        logger.debug('vtsls', p.message)
+        logger.debug(server, p.message)
         safeSendNotification(ctx.upstream, 'window/logMessage', {
             type: p.type,
-            message: `[vtsls] ${p.message}`
+            message: `[${server}] ${p.message}`
         })
     })
-    setupConfigHandler(ctx, conn, 'vtsls')
+    setupConfigHandler(ctx, conn, server)
+}
+
+export function setupVtslsHandlers(ctx: ProxyContext, conn: MessageConnection): void {
+    setupDownstreamHandlers(ctx, conn, 'vtsls')
 }
 
 export function setupVueLsHandlers(ctx: ProxyContext, conn: MessageConnection): void {
-    conn.onNotification('textDocument/publishDiagnostics', (params: unknown) => {
-        const p = params as { uri: string; diagnostics: Diagnostic[]; version?: unknown }
-        if (isInternalProbeUri(p.uri)) {
-            logger.debug('proxy', `publishDiagnostics ignored internal probe uri=${p.uri} count=${p.diagnostics.length}`)
-            return
-        }
-        const version = resolveDiagnosticsVersion(ctx, p.uri, p.version)
-        if (isVueUri(p.uri)) {
-            const merged = ctx.diagnosticsStore.update(p.uri, 'vue_ls', p.diagnostics)
-            logDiagnostics('vue_ls', p.uri, p.diagnostics.length, merged.length)
-            forwardDiagnosticsUpstream(ctx, p.uri, merged, version)
-        } else {
-            logDiagnostics('vue_ls', p.uri, p.diagnostics.length)
-            forwardDiagnosticsUpstream(ctx, p.uri, p.diagnostics, version)
-        }
-    })
-    conn.onNotification('window/logMessage', (params: unknown) => {
-        const p = params as { type: number; message: string }
-        logger.debug('vue_ls', p.message)
-        safeSendNotification(ctx.upstream, 'window/logMessage', {
-            type: p.type,
-            message: `[vue_ls] ${p.message}`
-        })
-    })
-    setupConfigHandler(ctx, conn, 'vue_ls')
+    setupDownstreamHandlers(ctx, conn, 'vue_ls')
 }
 
 export function setupConfigHandler(ctx: ProxyContext, conn: MessageConnection, serverName: string): void {
@@ -329,12 +309,7 @@ export function setupDocumentLifecycleHandlers(ctx: ProxyContext): void {
         invalidateWorkspaceCachesForUri(ctx, uri)
         ctx.diagnosticsStore.remove(uri)
         ctx.lastVtslsDiagnosticsAt.delete(uri)
-        clearVueDiagnosticsNudge(ctx, uri)
-        clearScriptDiagnosticsNudge(ctx, uri)
-        clearScriptDependentDiagnosticsNudge(ctx, uri)
-        ctx.queuedVueDiagnosticNudges.delete(uri)
-        ctx.queuedScriptDiagnosticNudges.delete(uri)
-        ctx.queuedScriptDependentDiagnosticNudges.delete(uri)
+        clearDiagnosticNudgesForUri(ctx, uri)
         safeSendNotification(ctx.currentVtsls, 'textDocument/didClose', params)
         if (isVueUri(uri)) {
             safeSendNotification(ctx.currentVueLs, 'textDocument/didClose', params)
@@ -537,7 +512,7 @@ function dedupeDiagnostics(diagnostics: Diagnostic[]): Diagnostic[] {
     const seen = new Set<string>()
     const result: Diagnostic[] = []
     for (const diagnostic of diagnostics) {
-        const key = `${diagnostic.range.start.line}:${diagnostic.range.start.character}:${diagnostic.range.end.line}:${diagnostic.range.end.character}:${diagnostic.message}`
+        const key = diagnosticKey(diagnostic)
         if (!seen.has(key)) {
             seen.add(key)
             result.push(diagnostic)

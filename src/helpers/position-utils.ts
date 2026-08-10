@@ -1,4 +1,5 @@
 import type { Position, Range } from 'vscode-languageserver-protocol'
+import type { CallHierarchyItemLike, LspLocation } from '../proxy-types.js'
 
 export function lineCharToOffset(text: string, position: Position): number {
     const lines = text.split('\n')
@@ -101,4 +102,54 @@ export function getLineWindow(text: string, offset: number): { lineStart: number
     }
 
     return { lineStart, lineEnd, localOffset: offset - lineStart }
+}
+
+export function isPosition(value: unknown): value is Position {
+    return (
+        value !== null &&
+        typeof value === 'object' &&
+        'line' in value &&
+        'character' in value &&
+        typeof (value as { line: unknown }).line === 'number' &&
+        typeof (value as { character: unknown }).character === 'number'
+    )
+}
+
+export function isRange(value: unknown): value is Range {
+    return (
+        value !== null &&
+        typeof value === 'object' &&
+        'start' in value &&
+        'end' in value &&
+        isPosition((value as { start: unknown }).start) &&
+        isPosition((value as { end: unknown }).end)
+    )
+}
+
+export function isLocation(value: unknown): value is LspLocation {
+    return (
+        value !== null &&
+        typeof value === 'object' &&
+        'uri' in value &&
+        typeof (value as { uri: unknown }).uri === 'string' &&
+        'range' in value &&
+        isRange((value as { range: unknown }).range)
+    )
+}
+
+export function isCallHierarchyItem(value: unknown): value is CallHierarchyItemLike {
+    return (
+        value !== null &&
+        typeof value === 'object' &&
+        'uri' in value &&
+        typeof (value as { uri: unknown }).uri === 'string' &&
+        'name' in value &&
+        typeof (value as { name: unknown }).name === 'string' &&
+        'kind' in value &&
+        typeof (value as { kind: unknown }).kind === 'number' &&
+        'range' in value &&
+        isRange((value as { range: unknown }).range) &&
+        'selectionRange' in value &&
+        isRange((value as { selectionRange: unknown }).selectionRange)
+    )
 }

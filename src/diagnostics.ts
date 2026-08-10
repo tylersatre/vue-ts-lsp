@@ -19,6 +19,11 @@ export interface Diagnostic {
 export type ServerKey = 'vtsls' | 'vue_ls'
 
 /** Merges vtsls and vue_ls diagnostics for the same URI and drops exact duplicates. */
+/** Identity for merge/dedupe across servers — extend here (e.g. code/source) in ONE place. */
+export function diagnosticKey(diagnostic: Diagnostic): string {
+    return `${diagnostic.range.start.line}:${diagnostic.range.start.character}:${diagnostic.range.end.line}:${diagnostic.range.end.character}:${diagnostic.message}`
+}
+
 export class DiagnosticsStore {
     private readonly store = new Map<string, Map<ServerKey, Diagnostic[]>>()
 
@@ -52,7 +57,7 @@ export class DiagnosticsStore {
 
         for (const diagnostics of diagnosticsByServer.values()) {
             for (const diagnostic of diagnostics) {
-                const key = `${diagnostic.range.start.line}:${diagnostic.range.start.character}:${diagnostic.range.end.line}:${diagnostic.range.end.character}:${diagnostic.message}`
+                const key = diagnosticKey(diagnostic)
                 if (!seen.has(key)) {
                     seen.add(key)
                     result.push(diagnostic)

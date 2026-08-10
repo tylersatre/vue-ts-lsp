@@ -58,3 +58,42 @@ describe('safeSendNotification', () => {
         expect(logger.warn).not.toHaveBeenCalled()
     })
 })
+
+const { tryRequest } = await import('@src/proxy-communication.js')
+const { createProxyContext } = await import('@src/proxy-context.js')
+const { DownstreamRequestTimeoutError } = await import('@src/proxy-types.js')
+
+describe('tryRequest', () => {
+    function createCtx(vtsls: { sendRequest: ReturnType<typeof vi.fn> }) {
+        const conn = () =>
+            ({
+                sendRequest: vi.fn().mockResolvedValue(null),
+                sendNotification: vi.fn(),
+                onRequest: vi.fn(),
+                onNotification: vi.fn(),
+                onClose: vi.fn(),
+                listen: vi.fn(),
+                dispose: vi.fn()
+            }) as unknown as MessageConnection
+        return createProxyContext(conn(), { ...(conn() as object), sendRequest: vtsls.sendRequest } as unknown as MessageConnection, conn())
+    }
+
+    it('returns the downstream result on success', async () => {
+        const sendRequest = vi.fn().mockResolvedValue({ ok: true })
+        const ctx = createCtx({ sendRequest })
+        await expect(tryRequest(ctx, 'vtsls', 'textDocument/definition', { p: 1 }, 50)).resolves.toEqual({ result: { ok: true }, timedOut: false })
+    })
+
+    it('swallows a downstream timeout into { result: null, timedOut: true }', async () => {
+        const sendRequest = vi.fn().mockReturnValue(new Promise(() => {}))
+        const ctx = createCtx({ sendRequest })
+        await expect(tryRequest(ctx, 'vtsls', 'textDocument/hover', {}, 10)).resolves.toEqual({ result: null, timedOut: true })
+    })
+
+    it('rethrows non-timeout errors', async () => {
+        const sendRequest = vi.fn().mockRejectedValue(new Error('boom'))
+        const ctx = createCtx({ sendRequest })
+        await expect(tryRequest(ctx, 'vtsls', 'textDocument/hover', {}, 50)).rejects.toThrow('boom')
+        expect(DownstreamRequestTimeoutError).toBeDefined()
+    })
+})

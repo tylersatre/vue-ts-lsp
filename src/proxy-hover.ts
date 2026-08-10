@@ -1,12 +1,13 @@
 import type { MessageConnection } from 'vscode-jsonrpc/node'
 import type { Position } from 'vscode-languageserver-protocol'
 import type { ProxyContext } from './proxy-context.js'
-import { VUE_HOVER_TIMEOUT_MS, VUE_LOADING_HOVER_RETRY_DELAY_MS, TS_EXECUTION_TARGET_SEMANTIC, DownstreamRequestTimeoutError } from './proxy-types.js'
+import { VUE_HOVER_TIMEOUT_MS, VUE_LOADING_HOVER_RETRY_DELAY_MS, TS_EXECUTION_TARGET_SEMANTIC } from './proxy-types.js'
 import { isVueUri, hoverResultLooksLoading, uriToFilePath, isTsserverQuickInfoBodyLike, extractTsserverResponseBody, quickInfoToHover } from './proxy-utils.js'
-import { sendDownstreamRequest, buildTsserverRequestCommand, maybeRecoverVtslsAfterTimeout } from './proxy-communication.js'
+import { sendDownstreamRequest, buildTsserverRequestCommand, maybeRecoverVtslsAfterTimeout, tryRequest } from './proxy-communication.js'
 import { getDocumentText } from './proxy-workspace.js'
 import { requestWithVueDefinitionRetry, buildNormalizedVueTemplateParams } from './proxy-definitions.js'
-import { normalizeReferenceLocations, extractRequestPosition } from './proxy-references.js'
+import { normalizeReferenceLocations } from './proxy-references.js'
+import { extractRequestPosition } from './helpers/identifiers.js'
 import { normalizeDefinitionResult, preferDefinitionResult } from './helpers/definitions.js'
 import { hoverResultLooksAny } from './helpers/hover.js'
 import { isVueTemplatePosition } from './helpers/vue-template.js'
@@ -35,24 +36,13 @@ export function hoverNeedsFallback(result: unknown, treatAnyAsPoor: boolean): bo
     return treatAnyAsPoor && hoverResultLooksAny(result)
 }
 
-export async function tryHoverRequest(
+export function tryHoverRequest(
     ctx: ProxyContext,
     target: 'vtsls' | 'vue_ls',
     params: unknown,
     timeoutMs = Math.min(ctx.requestTimeoutMs, VUE_HOVER_TIMEOUT_MS)
 ): Promise<{ result: unknown; timedOut: boolean }> {
-    try {
-        const result = await sendDownstreamRequest(ctx, target, 'textDocument/hover', params, {
-            retryOnTimeout: false,
-            timeoutMs
-        })
-        return { result, timedOut: false }
-    } catch (err: unknown) {
-        if (err instanceof DownstreamRequestTimeoutError) {
-            return { result: null, timedOut: true }
-        }
-        throw err
-    }
+    return tryRequest(ctx, target, 'textDocument/hover', params, timeoutMs)
 }
 
 export async function requestDefinitionBackedHoverFallback(ctx: ProxyContext, requestUri: string, params: unknown): Promise<unknown | null> {

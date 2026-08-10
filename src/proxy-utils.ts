@@ -2,12 +2,12 @@ import { createRequire } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { MessageConnection } from 'vscode-jsonrpc/node'
-import type { InitializeParams, Position, Range } from 'vscode-languageserver-protocol'
+import type { InitializeParams, Range } from 'vscode-languageserver-protocol'
 import { computeDocumentEnd } from './documents.js'
+import { isPosition, isRange, isLocation, isCallHierarchyItem } from './helpers/position-utils.js'
 import * as logger from './logger.js'
 import type {
     ContentChange,
-    LspLocation,
     CallHierarchyItemLike,
     TsserverDisplayPartLike,
     TsserverJSDocTagLike,
@@ -176,55 +176,7 @@ export function languageIdForUri(uri: string): string {
     return 'typescript'
 }
 
-export function isPosition(value: unknown): value is Position {
-    return (
-        value !== null &&
-        typeof value === 'object' &&
-        'line' in value &&
-        'character' in value &&
-        typeof (value as { line: unknown }).line === 'number' &&
-        typeof (value as { character: unknown }).character === 'number'
-    )
-}
-
-export function isRange(value: unknown): value is Range {
-    return (
-        value !== null &&
-        typeof value === 'object' &&
-        'start' in value &&
-        'end' in value &&
-        isPosition((value as { start: unknown }).start) &&
-        isPosition((value as { end: unknown }).end)
-    )
-}
-
-export function isLocation(value: unknown): value is LspLocation {
-    return (
-        value !== null &&
-        typeof value === 'object' &&
-        'uri' in value &&
-        typeof (value as { uri: unknown }).uri === 'string' &&
-        'range' in value &&
-        isRange((value as { range: unknown }).range)
-    )
-}
-
-export function isCallHierarchyItem(value: unknown): value is CallHierarchyItemLike {
-    return (
-        value !== null &&
-        typeof value === 'object' &&
-        'uri' in value &&
-        typeof (value as { uri: unknown }).uri === 'string' &&
-        'name' in value &&
-        typeof (value as { name: unknown }).name === 'string' &&
-        'kind' in value &&
-        typeof (value as { kind: unknown }).kind === 'number' &&
-        'range' in value &&
-        isRange((value as { range: unknown }).range) &&
-        'selectionRange' in value &&
-        isRange((value as { selectionRange: unknown }).selectionRange)
-    )
-}
+export { isPosition, isRange, isLocation, isCallHierarchyItem }
 
 export function itemKey(item: CallHierarchyItemLike): string {
     return [

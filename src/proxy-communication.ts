@@ -221,6 +221,31 @@ export async function sendDownstreamRequest(
     }
 }
 
+/**
+ * One-shot downstream request that reports a timeout as data instead of throwing —
+ * the retry ladders in the definition/hover modules branch on `timedOut`.
+ */
+export async function tryRequest(
+    ctx: ProxyContext,
+    target: DownstreamTarget,
+    method: string,
+    params: unknown,
+    timeoutMs: number
+): Promise<{ result: unknown; timedOut: boolean }> {
+    try {
+        const result = await sendDownstreamRequest(ctx, target, method, params, {
+            retryOnTimeout: false,
+            timeoutMs
+        })
+        return { result, timedOut: false }
+    } catch (err: unknown) {
+        if (err instanceof DownstreamRequestTimeoutError) {
+            return { result: null, timedOut: true }
+        }
+        throw err
+    }
+}
+
 export async function waitForVtslsForegroundIdle(ctx: ProxyContext, maxWaitMs: number): Promise<boolean> {
     const startedAt = Date.now()
     while (Date.now() - startedAt <= maxWaitMs) {

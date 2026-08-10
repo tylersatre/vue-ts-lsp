@@ -1,6 +1,19 @@
 import type { Position } from 'vscode-languageserver-protocol'
 
-import { lineCharToOffset } from './position-utils.js'
+import { lineCharToOffset, isPosition, isCallHierarchyItem } from './position-utils.js'
+import type { CallHierarchyItemLike } from '../proxy-types.js'
+
+export function extractRequestPosition(params: unknown): Position | null {
+    if (params !== null && typeof params === 'object' && 'position' in params && isPosition((params as { position: unknown }).position)) {
+        return (params as { position: Position }).position
+    }
+
+    if (params !== null && typeof params === 'object' && 'item' in params && isCallHierarchyItem((params as { item: unknown }).item)) {
+        return (params as { item: CallHierarchyItemLike }).item.selectionRange.start
+    }
+
+    return null
+}
 
 export function extractRequestUri(params: unknown): string | null {
     if (

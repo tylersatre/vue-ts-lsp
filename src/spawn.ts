@@ -3,11 +3,7 @@ import { createRequire } from 'node:module'
 import path from 'node:path'
 import { createMessageConnection, StreamMessageReader, StreamMessageWriter, type MessageConnection } from 'vscode-jsonrpc/node'
 
-export function spawnServer(
-    command: string,
-    args: string[],
-    options: { exitOnProcessError?: boolean } = {}
-): { conn: MessageConnection; kill: () => void } {
+export function spawnServer(command: string, args: string[], options: { exitOnProcessError?: boolean } = {}): { conn: MessageConnection; kill: () => void } {
     // Exit-on-error is right for the initial launch (the proxy is useless without its
     // children), but crash recovery must let a failed respawn fail just that attempt.
     const { exitOnProcessError = true } = options

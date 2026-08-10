@@ -5,7 +5,7 @@ import { DiagnosticsStore } from './diagnostics.js'
 import { createWorkspaceScanCache, type WorkspaceScanCache } from './proxy-workspace.js'
 import { RetryTracker } from './recovery.js'
 import type { WorkspaceConfig } from './config.js'
-import type { CrashRecoveryOptions, PathAliasConfig, RecentPositionContext } from './proxy-types.js'
+import type { CrashRecoveryOptions, DiagnosticNudgeChannel, DiagnosticNudgeChannelState, PathAliasConfig, RecentPositionContext } from './proxy-types.js'
 import { DOWNSTREAM_REQUEST_TIMEOUT_MS } from './proxy-types.js'
 
 export interface ProxyContext {
@@ -44,12 +44,7 @@ export interface ProxyContext {
 
     // Diagnostics nudging
     lastVtslsDiagnosticsAt: Map<string, number>
-    pendingVueDiagnosticNudges: Map<string, ReturnType<typeof setTimeout>>
-    queuedVueDiagnosticNudges: Set<string>
-    pendingScriptDiagnosticNudges: Map<string, ReturnType<typeof setTimeout>>
-    queuedScriptDiagnosticNudges: Set<string>
-    pendingScriptDependentDiagnosticNudges: Map<string, ReturnType<typeof setTimeout>>
-    queuedScriptDependentDiagnosticNudges: Set<string>
+    diagnosticNudges: Map<DiagnosticNudgeChannel, DiagnosticNudgeChannelState>
 
     // Background queue & tracking
     activeForegroundVtslsRequests: number
@@ -96,12 +91,11 @@ export function createProxyContext(
         workspaceScanCache: createWorkspaceScanCache(),
 
         lastVtslsDiagnosticsAt: new Map(),
-        pendingVueDiagnosticNudges: new Map(),
-        queuedVueDiagnosticNudges: new Set(),
-        pendingScriptDiagnosticNudges: new Map(),
-        queuedScriptDiagnosticNudges: new Set(),
-        pendingScriptDependentDiagnosticNudges: new Map(),
-        queuedScriptDependentDiagnosticNudges: new Set(),
+        diagnosticNudges: new Map([
+            ['vue', { pending: new Map(), queued: new Set() }],
+            ['script', { pending: new Map(), queued: new Set() }],
+            ['script-dependent', { pending: new Map(), queued: new Set() }]
+        ]),
 
         activeForegroundVtslsRequests: 0,
         vtslsBackgroundQueue: Promise.resolve(),
