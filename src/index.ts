@@ -75,8 +75,8 @@ if (realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url
     const { conn: vueLs, kill: killVueLs } = spawnServer(vueLsCfg.command, vueLsCfg.args)
     setupProxy(upstream, vtsls, vueLs, {
         cliLogLevel,
-        spawnVtsls: () => spawnServer(vtslsCfg.command, vtslsCfg.args),
-        spawnVueLs: () => spawnServer(vueLsCfg.command, vueLsCfg.args),
+        spawnVtsls: () => spawnServer(vtslsCfg.command, vtslsCfg.args, { exitOnProcessError: false }),
+        spawnVueLs: () => spawnServer(vueLsCfg.command, vueLsCfg.args, { exitOnProcessError: false }),
         killVtsls,
         killVueLs
     })
