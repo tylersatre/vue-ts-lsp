@@ -5905,3 +5905,115 @@ describe('notification write failure resilience', () => {
         expect(logger.warn).toHaveBeenCalledWith('proxy', expect.stringContaining('write EPIPE'))
     })
 })
+
+describe('client LRU eviction cycle (didClose then re-didOpen)', () => {
+    // Claude Code >= 2.1.208 evicts documents past a 50-open-doc LRU cap: the evicted
+    // doc gets a didClose, and a fresh didOpen when touched again. Formerly dead code
+    // against 2.1.204, now a real client-driven path.
+    let upstream: MockConnection
+    let vtslsConn: MockConnection
+    let vueLsConn: MockConnection
+    let documentStore: import('@src/documents.js').DocumentStore
+
+    const vueUri = 'file:///workspace/Evicted.vue'
+    const tsUri = 'file:///workspace/evicted.ts'
+
+    beforeEach(() => {
+        upstream = createMockConnection()
+        vtslsConn = createMockConnection()
+        vueLsConn = createMockConnection()
+        documentStore = setupProxy(
+            upstream as unknown as MessageConnection,
+            vtslsConn as unknown as MessageConnection,
+            vueLsConn as unknown as MessageConnection
+        )
+    })
+
+    function diagnostic(message: string): { range: { start: { line: number; character: number }; end: { line: number; character: number } }; message: string } {
+        return { range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, message }
+    }
+
+    it('forwards didClose for a .vue doc to both servers and cleans up stores', () => {
+        upstream.triggerNotification('textDocument/didOpen', {
+            textDocument: { uri: vueUri, languageId: 'vue', version: 1, text: '<template><div/></template>' }
+        })
+        expect(documentStore.get(vueUri)).toBeDefined()
+
+        const closeParams = { textDocument: { uri: vueUri } }
+        upstream.triggerNotification('textDocument/didClose', closeParams)
+
+        expect(vtslsConn.sendNotification).toHaveBeenCalledWith('textDocument/didClose', closeParams)
+        expect(vueLsConn.sendNotification).toHaveBeenCalledWith('textDocument/didClose', closeParams)
+        expect(documentStore.get(vueUri)).toBeUndefined()
+    })
+
+    it('forwards didClose for a .ts doc to vtsls only', () => {
+        upstream.triggerNotification('textDocument/didOpen', {
+            textDocument: { uri: tsUri, languageId: 'typescript', version: 1, text: 'const x = 1;' }
+        })
+        const closeParams = { textDocument: { uri: tsUri } }
+        upstream.triggerNotification('textDocument/didClose', closeParams)
+
+        expect(vtslsConn.sendNotification).toHaveBeenCalledWith('textDocument/didClose', closeParams)
+        expect(vueLsConn.sendNotification).not.toHaveBeenCalledWith('textDocument/didClose', expect.anything())
+        expect(documentStore.get(tsUri)).toBeUndefined()
+    })
+
+    it('treats a re-didOpen after eviction as a fresh open, not the repeated-didOpen self-heal', () => {
+        upstream.triggerNotification('textDocument/didOpen', {
+            textDocument: { uri: vueUri, languageId: 'vue', version: 1, text: '<template><div/></template>' }
+        })
+        upstream.triggerNotification('textDocument/didClose', { textDocument: { uri: vueUri } })
+        vtslsConn.sendNotification.mockClear()
+        vueLsConn.sendNotification.mockClear()
+
+        const reopenParams = {
+            textDocument: { uri: vueUri, languageId: 'vue', version: 1, text: '<template><span/></template>' }
+        }
+        upstream.triggerNotification('textDocument/didOpen', reopenParams)
+
+        expect(vtslsConn.sendNotification).toHaveBeenCalledWith('textDocument/didOpen', reopenParams)
+        expect(vueLsConn.sendNotification).toHaveBeenCalledWith('textDocument/didOpen', reopenParams)
+        expect(vtslsConn.sendNotification).not.toHaveBeenCalledWith('textDocument/didChange', expect.anything())
+        expect(documentStore.get(vueUri)?.content).toBe('<template><span/></template>')
+    })
+
+    it('does not blend pre-eviction diagnostics into the merged view after re-open', () => {
+        upstream.triggerNotification('textDocument/didOpen', {
+            textDocument: { uri: vueUri, languageId: 'vue', version: 1, text: '<template><div/></template>' }
+        })
+        // Both servers publish before eviction; merged view contains both entries.
+        vueLsConn.triggerNotification('textDocument/publishDiagnostics', { uri: vueUri, diagnostics: [diagnostic('stale vue_ls error')] })
+        vtslsConn.triggerNotification('textDocument/publishDiagnostics', { uri: vueUri, diagnostics: [diagnostic('vtsls error')] })
+
+        upstream.triggerNotification('textDocument/didClose', { textDocument: { uri: vueUri } })
+        upstream.triggerNotification('textDocument/didOpen', {
+            textDocument: { uri: vueUri, languageId: 'vue', version: 1, text: '<template><div/></template>' }
+        })
+        upstream.sendNotification.mockClear()
+
+        vtslsConn.triggerNotification('textDocument/publishDiagnostics', { uri: vueUri, diagnostics: [diagnostic('fresh vtsls error')] })
+
+        const forwarded = upstream.sendNotification.mock.calls.filter(([method]) => method === 'textDocument/publishDiagnostics')
+        expect(forwarded).toHaveLength(1)
+        const payload = forwarded[0]![1] as { diagnostics: Array<{ message: string }> }
+        expect(payload.diagnostics.map((d) => d.message)).toEqual(['fresh vtsls error'])
+    })
+
+    it('resumes version stamping from the fresh open after the cycle', () => {
+        upstream.triggerNotification('textDocument/didOpen', {
+            textDocument: { uri: vueUri, languageId: 'vue', version: 7, text: '<template><div/></template>' }
+        })
+        upstream.triggerNotification('textDocument/didClose', { textDocument: { uri: vueUri } })
+        upstream.triggerNotification('textDocument/didOpen', {
+            textDocument: { uri: vueUri, languageId: 'vue', version: 9, text: '<template><div/></template>' }
+        })
+        upstream.sendNotification.mockClear()
+
+        vtslsConn.triggerNotification('textDocument/publishDiagnostics', { uri: vueUri, diagnostics: [] })
+
+        const forwarded = upstream.sendNotification.mock.calls.find(([method]) => method === 'textDocument/publishDiagnostics')
+        expect(forwarded).toBeDefined()
+        expect((forwarded![1] as { version?: number }).version).toBe(9)
+    })
+})

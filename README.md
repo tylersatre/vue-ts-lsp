@@ -73,15 +73,20 @@ claude plugin install vue-ts-lsp@vue-ts-lsp
 }
 ```
 
-Claude Code also accepts these optional fields in `.lsp.json` (as of Claude Code 2.1.204):
+Claude Code also accepts these optional fields in `.lsp.json` (as of Claude Code 2.1.226; behavior is version-dependent):
 
-| Field         | Type       | Default | Description                                                                                 |
-| ------------- | ---------- | ------- | ------------------------------------------------------------------------------------------- |
-| `args`        | `string[]` | `[]`    | Extra CLI arguments — e.g. `["--log-level=debug"]` to enable proxy debug logging            |
-| `diagnostics` | `boolean`  | `true`  | Set `false` to keep code navigation but suppress automatic diagnostic injection after edits |
-| `maxRestarts` | `number`   | `3`     | Crash-recovery attempts for the proxy process before Claude Code gives up                   |
+| Field                   | Type       | Default | Description                                                                                 |
+| ----------------------- | ---------- | ------- | ------------------------------------------------------------------------------------------- |
+| `args`                  | `string[]` | `[]`    | Extra CLI arguments — e.g. `["--log-level=debug"]` to enable proxy debug logging            |
+| `diagnostics`           | `boolean`  | `true`  | Set `false` to keep code navigation but suppress automatic diagnostic injection after edits |
+| `maxRestarts`           | `number`   | `3`     | Crash-recovery attempts for the proxy process before Claude Code gives up                   |
+| `restartOnCrash`        | `boolean`  | —       | Client-level restart of the whole proxy on crash (implemented since ~2.1.2xx)               |
+| `shutdownTimeout`       | `number`   | —       | How long Claude Code waits for a graceful shutdown before killing the server                |
+| `env`                   | `object`   | —       | Extra environment variables for the server process                                          |
+| `initializationOptions` | `object`   | —       | Passed through in the LSP `initialize` request                                              |
+| `settings`              | `object`   | —       | Pushed to the server via `workspace/didChangeConfiguration`                                 |
 
-> **Warning:** Do not add `restartOnCrash` or `shutdownTimeout` — Claude Code 2.1.204 recognizes but rejects them ("not yet implemented"), and the server will fail to start.
+> **Note:** On Claude Code 2.1.204 and earlier, `restartOnCrash` and `shutdownTimeout` were recognized but rejected ("not yet implemented") and would prevent the server from starting. Both work on 2.1.226+. Client-level restart is complementary to the proxy's own crash recovery for its child servers — the proxy also self-heals the client's no-`didOpen`-replay behavior after a restart.
 
 > **Note:** This proxy replaces separate vtsls and vue-volar plugins. Do not enable them simultaneously: Claude Code assigns each file extension to the first plugin that claims it, so a competing TypeScript plugin (e.g. `typescript-lsp`) can capture `.ts`/`.tsx` files while this proxy serves `.vue` — splitting the two sides of cross-file navigation across unrelated servers.
 
