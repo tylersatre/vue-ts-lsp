@@ -9,7 +9,7 @@ import {
     SCRIPT_DEPENDENT_DIAGNOSTIC_FILE_LIMIT,
     VTSLS_BACKGROUND_REQUEST_TIMEOUT_MS
 } from './proxy-types.js'
-import { executeTsserverCommand, enqueueVtslsBackgroundCommand, sendDownstreamRequest, sendTsserverCommand } from './proxy-communication.js'
+import { executeTsserverCommand, enqueueVtslsBackgroundCommand, safeSendNotification, sendDownstreamRequest, sendTsserverCommand } from './proxy-communication.js'
 import { getDocumentText, collectWorkspaceImporterUris } from './proxy-workspace.js'
 import { isVueUri, isScriptLikeUri, uriToFilePath } from './proxy-utils.js'
 import { isInternalProbeUri } from './helpers/probes.js'
@@ -32,7 +32,7 @@ export function forwardDiagnosticsUpstream(ctx: ProxyContext, uri: string, diagn
     if (version !== undefined) {
         params.version = version
     }
-    ctx.upstream.sendNotification('textDocument/publishDiagnostics', params)
+    safeSendNotification(ctx.upstream, 'textDocument/publishDiagnostics', params)
 }
 
 /**

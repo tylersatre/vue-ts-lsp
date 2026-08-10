@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest'
-import { hasExplicitLogLevelArg, parseArgs } from '@src/index.js'
+import { describe, it, expect, vi, afterEach } from 'vitest'
+import { hasExplicitLogLevelArg, installUnhandledRejectionGuard, parseArgs } from '@src/index.js'
 
 describe('parseArgs', () => {
     it('defaults to logLevel:error', () => {
@@ -61,5 +61,33 @@ describe('hasExplicitLogLevelArg', () => {
     it('returns false for invalid log-level flags', () => {
         expect(hasExplicitLogLevelArg(['--log-level=trace'])).toBe(false)
         expect(hasExplicitLogLevelArg(['--log-level', 'verbose'])).toBe(false)
+    })
+})
+
+describe('installUnhandledRejectionGuard', () => {
+    afterEach(() => {
+        vi.restoreAllMocks()
+    })
+
+    it('registers a handler that logs to stderr without exiting the process', () => {
+        const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+        const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {
+            throw new Error('process.exit called')
+        })
+        let handler: ((reason: unknown) => void) | undefined
+        const onSpy = vi.spyOn(process, 'on').mockImplementation((event: string | symbol, listener: (...args: unknown[]) => void) => {
+            if (event === 'unhandledRejection') {
+                handler = listener
+            }
+            return process
+        })
+
+        installUnhandledRejectionGuard()
+
+        expect(onSpy).toHaveBeenCalledWith('unhandledRejection', expect.any(Function))
+        expect(handler).toBeDefined()
+        expect(() => handler!(new Error('write EPIPE'))).not.toThrow()
+        expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('write EPIPE'))
+        expect(exitSpy).not.toHaveBeenCalled()
     })
 })

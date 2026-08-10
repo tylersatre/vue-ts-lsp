@@ -5772,3 +5772,59 @@ describe('didChange full-document replacement patching', () => {
         expect(range.end.line).not.toBe(393)
     })
 })
+
+describe('notification write failure resilience', () => {
+    let upstream: MockConnection
+    let vtslsConn: MockConnection
+    let vueLsConn: MockConnection
+
+    beforeEach(() => {
+        vi.mocked(logger.warn).mockClear()
+        upstream = createMockConnection()
+        vtslsConn = createMockConnection()
+        vueLsConn = createMockConnection()
+        setupProxy(upstream as unknown as MessageConnection, vtslsConn as unknown as MessageConnection, vueLsConn as unknown as MessageConnection)
+    })
+
+    it('logs instead of leaking an unhandled rejection when a didChange write to vtsls fails', async () => {
+        upstream.triggerNotification('textDocument/didOpen', {
+            textDocument: { uri: 'file:///foo.ts', languageId: 'typescript', version: 1, text: 'const x = 1;' }
+        })
+        vtslsConn.sendNotification.mockImplementation(() => Promise.reject(new Error('write EPIPE')))
+
+        upstream.triggerNotification('textDocument/didChange', {
+            textDocument: { uri: 'file:///foo.ts', version: 2 },
+            contentChanges: [{ text: 'const x = 2;' }]
+        })
+        await new Promise((resolve) => setTimeout(resolve, 0))
+
+        expect(logger.warn).toHaveBeenCalledWith('proxy', expect.stringContaining('write EPIPE'))
+    })
+
+    it('logs instead of leaking an unhandled rejection when the tsserver/response write fails', async () => {
+        await upstream.triggerRequest('initialize', {
+            rootUri: 'file:///workspace',
+            workspaceFolders: [{ uri: 'file:///workspace', name: 'workspace' }],
+            capabilities: {}
+        })
+        vtslsConn.sendRequest.mockResolvedValue({ body: { ok: true } })
+        vueLsConn.sendNotification.mockImplementation(() => Promise.reject(new Error('write EPIPE')))
+
+        vueLsConn.triggerNotification('tsserver/request', [7, 'quickinfo', { file: '/workspace/foo.ts' }])
+        await new Promise((resolve) => setTimeout(resolve, 0))
+
+        expect(logger.warn).toHaveBeenCalledWith('proxy', expect.stringContaining('tsserver/response'))
+    })
+
+    it('logs instead of leaking an unhandled rejection when forwarding publishDiagnostics upstream fails', async () => {
+        upstream.triggerNotification('textDocument/didOpen', {
+            textDocument: { uri: 'file:///foo.ts', languageId: 'typescript', version: 1, text: 'const x = 1;' }
+        })
+        upstream.sendNotification.mockImplementation(() => Promise.reject(new Error('write EPIPE')))
+
+        vtslsConn.triggerNotification('textDocument/publishDiagnostics', { uri: 'file:///foo.ts', diagnostics: [] })
+        await new Promise((resolve) => setTimeout(resolve, 0))
+
+        expect(logger.warn).toHaveBeenCalledWith('proxy', expect.stringContaining('write EPIPE'))
+    })
+})

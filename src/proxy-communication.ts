@@ -15,6 +15,25 @@ import { classifyDefinitionResult } from './helpers/definitions.js'
 import { isDefinitionMirrorUri } from './definition-mirrors.js'
 import * as logger from './logger.js'
 
+/**
+ * sendNotification returns a promise that rejects asynchronously when the underlying
+ * write fails (e.g. EPIPE to a crashed child). Every notification send must go through
+ * here: an unhandled rejection would terminate the whole proxy process.
+ */
+export function safeSendNotification(conn: MessageConnection, method: string, params?: unknown, label?: string): void {
+    const logFailure = (err: unknown): void => {
+        const msg = err instanceof Error ? err.message : String(err)
+        logger.warn('proxy', `${label ?? `sendNotification ${method}`} dropped: ${msg}`)
+    }
+    try {
+        // Preserve call arity: some notifications (e.g. `exit`) carry no params.
+        const sent = params === undefined ? conn.sendNotification(method) : conn.sendNotification(method, params)
+        void Promise.resolve(sent).catch(logFailure)
+    } catch (err: unknown) {
+        logFailure(err)
+    }
+}
+
 export function logDiagnostics(server: 'vtsls' | 'vue_ls', uri: string, count: number, mergedCount?: number): void {
     const merged = mergedCount === undefined ? '' : ` merged=${mergedCount}`
     logger.debug('proxy', `publishDiagnostics ${server} uri=${uri} count=${count}${merged}`)

@@ -15,6 +15,7 @@ import {
 } from './proxy-utils.js'
 import {
     sendDownstreamRequest,
+    safeSendNotification,
     buildTsserverRequestCommand,
     logDiagnostics,
     summarizeResultCount,
@@ -67,7 +68,7 @@ export function setupVtslsHandlers(ctx: ProxyContext, conn: MessageConnection): 
     conn.onNotification('window/logMessage', (params: unknown) => {
         const p = params as { type: number; message: string }
         logger.debug('vtsls', p.message)
-        ctx.upstream.sendNotification('window/logMessage', {
+        safeSendNotification(ctx.upstream, 'window/logMessage', {
             type: p.type,
             message: `[vtsls] ${p.message}`
         })
@@ -95,7 +96,7 @@ export function setupVueLsHandlers(ctx: ProxyContext, conn: MessageConnection): 
     conn.onNotification('window/logMessage', (params: unknown) => {
         const p = params as { type: number; message: string }
         logger.debug('vue_ls', p.message)
-        ctx.upstream.sendNotification('window/logMessage', {
+        safeSendNotification(ctx.upstream, 'window/logMessage', {
             type: p.type,
             message: `[vue_ls] ${p.message}`
         })
@@ -127,12 +128,7 @@ export function setupConfigHandler(ctx: ProxyContext, conn: MessageConnection, s
 
 export function setupTsserverRequestHandler(ctx: ProxyContext, conn: MessageConnection): void {
     const sendTsserverResponse = (id: number, body: unknown): void => {
-        try {
-            conn.sendNotification('tsserver/response', [id, body])
-        } catch (err: unknown) {
-            const msg = err instanceof Error ? err.message : String(err)
-            logger.warn('proxy', `tsserver/response #${id} dropped: ${msg}`)
-        }
+        safeSendNotification(conn, 'tsserver/response', [id, body], `tsserver/response #${id}`)
     }
 
     conn.onNotification('tsserver/request', (params: unknown) => {
@@ -170,9 +166,9 @@ export function setupTsserverRequestHandler(ctx: ProxyContext, conn: MessageConn
 export function openDocumentOnServers(ctx: ProxyContext, uri: string, languageId: string, version: number, text: string): void {
     ctx.documentStore.open(uri, languageId, version, text)
     const params = { textDocument: { uri, languageId, version, text } }
-    ctx.currentVtsls.sendNotification('textDocument/didOpen', params)
+    safeSendNotification(ctx.currentVtsls, 'textDocument/didOpen', params)
     if (isVueUri(uri)) {
-        ctx.currentVueLs.sendNotification('textDocument/didOpen', params)
+        safeSendNotification(ctx.currentVueLs, 'textDocument/didOpen', params)
         scheduleVueDiagnosticsNudge(ctx, uri)
     }
     maybePrimeDocument(ctx, uri)
@@ -251,9 +247,9 @@ export function setupDocumentLifecycleHandlers(ctx: ProxyContext): void {
                 ]
             }
             ctx.documentStore.open(uri, languageId, version, text)
-            ctx.currentVtsls.sendNotification('textDocument/didChange', changeParams)
+            safeSendNotification(ctx.currentVtsls, 'textDocument/didChange', changeParams)
             if (isVueUri(uri)) {
-                ctx.currentVueLs.sendNotification('textDocument/didChange', changeParams)
+                safeSendNotification(ctx.currentVueLs, 'textDocument/didChange', changeParams)
                 scheduleVueDiagnosticsNudge(ctx, uri)
             } else if (isScriptLikeUri(uri)) {
                 scheduleScriptDiagnosticsNudge(ctx, uri)
@@ -265,9 +261,9 @@ export function setupDocumentLifecycleHandlers(ctx: ProxyContext): void {
         const target = isVueUri(uri) ? 'vtsls+vue_ls' : 'vtsls'
         logger.info('proxy', `textDocument/didOpen ${uri} → ${target}`)
         logger.debug('proxy', `textDocument/didOpen payload: ${summarizePayload(params)}`)
-        ctx.currentVtsls.sendNotification('textDocument/didOpen', params)
+        safeSendNotification(ctx.currentVtsls, 'textDocument/didOpen', params)
         if (isVueUri(uri)) {
-            ctx.currentVueLs.sendNotification('textDocument/didOpen', params)
+            safeSendNotification(ctx.currentVueLs, 'textDocument/didOpen', params)
             scheduleVueDiagnosticsNudge(ctx, uri)
         }
         maybePrimeDocument(ctx, uri)
@@ -313,9 +309,9 @@ export function setupDocumentLifecycleHandlers(ctx: ProxyContext): void {
         ctx.documentStore.change(uri, version, didChangeParams.contentChanges)
 
         logger.debug('proxy', `textDocument/didChange ${uri} v${version}`)
-        ctx.currentVtsls.sendNotification('textDocument/didChange', forwardedChangeParams)
+        safeSendNotification(ctx.currentVtsls, 'textDocument/didChange', forwardedChangeParams)
         if (isVueUri(uri)) {
-            ctx.currentVueLs.sendNotification('textDocument/didChange', forwardedChangeParams)
+            safeSendNotification(ctx.currentVueLs, 'textDocument/didChange', forwardedChangeParams)
             scheduleVueDiagnosticsNudge(ctx, uri)
         } else if (isScriptLikeUri(uri)) {
             scheduleScriptDiagnosticsNudge(ctx, uri)
@@ -335,18 +331,18 @@ export function setupDocumentLifecycleHandlers(ctx: ProxyContext): void {
         ctx.queuedVueDiagnosticNudges.delete(uri)
         ctx.queuedScriptDiagnosticNudges.delete(uri)
         ctx.queuedScriptDependentDiagnosticNudges.delete(uri)
-        ctx.currentVtsls.sendNotification('textDocument/didClose', params)
+        safeSendNotification(ctx.currentVtsls, 'textDocument/didClose', params)
         if (isVueUri(uri)) {
-            ctx.currentVueLs.sendNotification('textDocument/didClose', params)
+            safeSendNotification(ctx.currentVueLs, 'textDocument/didClose', params)
         }
     })
 
     ctx.upstream.onNotification('textDocument/didSave', (params: unknown) => {
         const didSaveParams = params as { textDocument: { uri: string } }
         const { uri } = didSaveParams.textDocument
-        ctx.currentVtsls.sendNotification('textDocument/didSave', params)
+        safeSendNotification(ctx.currentVtsls, 'textDocument/didSave', params)
         if (isVueUri(uri)) {
-            ctx.currentVueLs.sendNotification('textDocument/didSave', params)
+            safeSendNotification(ctx.currentVueLs, 'textDocument/didSave', params)
         }
     })
 }

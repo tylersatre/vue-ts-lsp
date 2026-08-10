@@ -4,7 +4,7 @@ import type { Position, Range } from 'vscode-languageserver-protocol'
 import type { ProxyContext } from './proxy-context.js'
 import { VUE_DEFINITION_TIMEOUT_MS, VUE_DEFINITION_RETRY_DELAY_MS, VUE_PROJECT_WARMUP_DELAY_MS, DownstreamRequestTimeoutError } from './proxy-types.js'
 import { isVueUri, isScriptLikeUri, isPosition, uriToFilePath } from './proxy-utils.js'
-import { sendDownstreamRequest, executeTsserverCommand, maybeRecoverVtslsAfterTimeout } from './proxy-communication.js'
+import { safeSendNotification, sendDownstreamRequest, executeTsserverCommand, maybeRecoverVtslsAfterTimeout } from './proxy-communication.js'
 import { getDocumentText, resolveWorkspaceModuleSpecifier } from './proxy-workspace.js'
 import { classifyDefinitionResult, normalizeDefinitionResult, preferDefinitionResult } from './helpers/definitions.js'
 import { findVueImportAtPosition, normalizeVueImportPosition, findImportAtPosition, normalizeImportPosition, findImportByLocalName } from './helpers/imports.js'
@@ -225,7 +225,7 @@ export async function requestImportDefinitionProbe(ctx: ProxyContext, requestUri
         `textDocument/definition probe open uri=${requestUri} probe=${probe.uri} module=${importTarget.moduleSpecifier} import=${importTarget.localName}`
     )
 
-    ctx.currentVtsls.sendNotification('textDocument/didOpen', {
+    safeSendNotification(ctx.currentVtsls, 'textDocument/didOpen', {
         textDocument: {
             uri: probe.uri,
             languageId: 'typescript',
@@ -249,7 +249,7 @@ export async function requestImportDefinitionProbe(ctx: ProxyContext, requestUri
         logger.warn('proxy', `textDocument/definition probe ${requestUri} ERROR: ${msg}`)
         return null
     } finally {
-        ctx.currentVtsls.sendNotification('textDocument/didClose', {
+        safeSendNotification(ctx.currentVtsls, 'textDocument/didClose', {
             textDocument: { uri: probe.uri }
         })
     }

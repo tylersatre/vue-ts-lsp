@@ -14,6 +14,7 @@ import {
     forwardRequest
 } from './proxy-handlers.js'
 import { recoverVtsls, recoverVueLs, setupVtslsCrashRecovery, setupVueLsCrashRecovery } from './proxy-recovery.js'
+import { safeSendNotification } from './proxy-communication.js'
 import type { DocumentStore } from './documents.js'
 import * as logger from './logger.js'
 
@@ -108,14 +109,14 @@ export function setupProxy(
     })
 
     upstream.onNotification('initialized', (params: unknown) => {
-        ctx.currentVtsls.sendNotification('initialized', params)
-        ctx.currentVueLs.sendNotification('initialized', params)
+        safeSendNotification(ctx.currentVtsls, 'initialized', params)
+        safeSendNotification(ctx.currentVueLs, 'initialized', params)
         if (ctx.savedVueTypescriptPluginLocation !== null) {
             logger.debug('proxy', 'pushing workspace/didChangeConfiguration to child servers')
-            ctx.currentVtsls.sendNotification('workspace/didChangeConfiguration', {
+            safeSendNotification(ctx.currentVtsls, 'workspace/didChangeConfiguration', {
                 settings: buildVtslsSettings(ctx.savedVueTypescriptPluginLocation)
             })
-            ctx.currentVueLs.sendNotification('workspace/didChangeConfiguration', {
+            safeSendNotification(ctx.currentVueLs, 'workspace/didChangeConfiguration', {
                 settings: buildVueLsSettings()
             })
         }
@@ -146,8 +147,8 @@ export function setupProxy(
     })
 
     upstream.onNotification('exit', () => {
-        ctx.currentVtsls.sendNotification('exit')
-        ctx.currentVueLs.sendNotification('exit')
+        safeSendNotification(ctx.currentVtsls, 'exit')
+        safeSendNotification(ctx.currentVueLs, 'exit')
         process.exit(0)
     })
 

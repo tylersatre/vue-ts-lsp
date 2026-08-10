@@ -11,7 +11,7 @@ import {
     itemKey,
     mergeIncomingCallResults
 } from './proxy-utils.js'
-import { sendDownstreamRequest, summarizeResultCount } from './proxy-communication.js'
+import { safeSendNotification, sendDownstreamRequest, summarizeResultCount } from './proxy-communication.js'
 import { getDocumentText } from './proxy-workspace.js'
 import { requestWithReferenceFallback, extractRequestPosition } from './proxy-references.js'
 import { requestDocumentSymbols } from './proxy-symbols.js'
@@ -77,7 +77,7 @@ export async function requestWithPrepareCallHierarchyFallback(
 
         const temporarilyOpened = ctx.documentStore.get(symbol.uri) === undefined && targetText !== null
         if (temporarilyOpened) {
-            ctx.currentVtsls.sendNotification('textDocument/didOpen', {
+            safeSendNotification(ctx.currentVtsls, 'textDocument/didOpen', {
                 textDocument: {
                     uri: symbol.uri,
                     languageId: languageIdForUri(symbol.uri),
@@ -102,7 +102,7 @@ export async function requestWithPrepareCallHierarchyFallback(
             }
         } finally {
             if (temporarilyOpened) {
-                ctx.currentVtsls.sendNotification('textDocument/didClose', {
+                safeSendNotification(ctx.currentVtsls, 'textDocument/didClose', {
                     textDocument: { uri: symbol.uri }
                 })
             }

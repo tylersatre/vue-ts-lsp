@@ -1,6 +1,7 @@
 import type { MessageConnection } from 'vscode-jsonrpc/node'
 import type { ProxyContext } from './proxy-context.js'
 import { normalizeSpawnedConnection, buildVtslsInitParams, buildVtslsSettings, buildVueLsInitParams, buildVueLsSettings, isVueUri } from './proxy-utils.js'
+import { safeSendNotification } from './proxy-communication.js'
 import * as logger from './logger.js'
 
 export function setupVtslsCrashRecovery(ctx: ProxyContext, conn: MessageConnection, recoverFn: (reason: string, forceKill?: boolean) => Promise<void>): void {
@@ -37,7 +38,7 @@ export async function recoverVtsls(ctx: ProxyContext, reason: string, setupHandl
 
         if (!ctx.vtslsRetry.canRestart()) {
             logger.error('proxy', `vtsls: retry cap reached (max ${ctx.vtslsRetry.maxRestarts} in ${ctx.vtslsRetry.windowMs / 1000}s)`)
-            ctx.upstream.sendNotification('window/showMessage', {
+            safeSendNotification(ctx.upstream, 'window/showMessage', {
                 type: 1,
                 message: 'vue-ts-lsp: vtsls has crashed too many times and will not be restarted. Please reload your editor.'
             })
@@ -62,14 +63,14 @@ export async function recoverVtsls(ctx: ProxyContext, reason: string, setupHandl
 
         if (ctx.savedInitParams !== null && ctx.savedVueTypescriptPluginLocation !== null) {
             await ctx.currentVtsls.sendRequest('initialize', buildVtslsInitParams(ctx.savedInitParams, ctx.savedVueTypescriptPluginLocation))
-            ctx.currentVtsls.sendNotification('initialized', {})
-            ctx.currentVtsls.sendNotification('workspace/didChangeConfiguration', {
+            safeSendNotification(ctx.currentVtsls, 'initialized', {})
+            safeSendNotification(ctx.currentVtsls, 'workspace/didChangeConfiguration', {
                 settings: buildVtslsSettings(ctx.savedVueTypescriptPluginLocation)
             })
         }
 
         for (const [uri, doc] of ctx.documentStore.getAll()) {
-            ctx.currentVtsls.sendNotification('textDocument/didOpen', {
+            safeSendNotification(ctx.currentVtsls, 'textDocument/didOpen', {
                 textDocument: {
                     uri,
                     languageId: doc.languageId,
@@ -98,7 +99,7 @@ export async function recoverVueLs(ctx: ProxyContext, reason: string, setupHandl
 
         if (!ctx.vueLsRetry.canRestart()) {
             logger.error('proxy', `vue_ls: retry cap reached (max ${ctx.vueLsRetry.maxRestarts} in ${ctx.vueLsRetry.windowMs / 1000}s)`)
-            ctx.upstream.sendNotification('window/showMessage', {
+            safeSendNotification(ctx.upstream, 'window/showMessage', {
                 type: 1,
                 message: 'vue-ts-lsp: vue-language-server has crashed too many times and will not be restarted. Please reload your editor.'
             })
@@ -127,15 +128,15 @@ export async function recoverVueLs(ctx: ProxyContext, reason: string, setupHandl
 
         if (ctx.savedInitParams !== null) {
             await ctx.currentVueLs.sendRequest('initialize', buildVueLsInitParams(ctx.savedInitParams))
-            ctx.currentVueLs.sendNotification('initialized', {})
-            ctx.currentVueLs.sendNotification('workspace/didChangeConfiguration', {
+            safeSendNotification(ctx.currentVueLs, 'initialized', {})
+            safeSendNotification(ctx.currentVueLs, 'workspace/didChangeConfiguration', {
                 settings: buildVueLsSettings()
             })
         }
 
         for (const [uri, doc] of ctx.documentStore.getAll()) {
             if (isVueUri(uri)) {
-                ctx.currentVueLs.sendNotification('textDocument/didOpen', {
+                safeSendNotification(ctx.currentVueLs, 'textDocument/didOpen', {
                     textDocument: {
                         uri,
                         languageId: doc.languageId,
