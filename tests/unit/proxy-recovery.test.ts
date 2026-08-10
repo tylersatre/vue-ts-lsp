@@ -189,6 +189,35 @@ describe('recoverVtsls', () => {
         expect(ctx.currentVtsls).toBe(oldVtsls)
         expect(spawnedKill).toHaveBeenCalled()
     })
+
+    it('schedules another attempt after a failed recovery instead of dead-ending', async () => {
+        // The old connection's onClose has already fired by the time recovery runs, so
+        // nothing external will ever trigger another attempt — recovery must re-arm itself.
+        const { ctx, recoveredConn, spawnVtsls } = createVtslsRecoveryContext()
+        const secondConn = createMockConnection()
+        recoveredConn.sendRequest.mockRejectedValue(new Error('initialize failed'))
+        spawnVtsls.mockReturnValueOnce({ conn: recoveredConn, kill: vi.fn() }).mockReturnValueOnce({ conn: secondConn, kill: vi.fn() })
+
+        await expect(recoverVtsls(ctx, 'connection closed', () => {})).rejects.toThrow('initialize failed')
+        await new Promise((resolve) => setTimeout(resolve, 20))
+
+        expect(spawnVtsls).toHaveBeenCalledTimes(2)
+        expect(ctx.currentVtsls).toBe(secondConn)
+    })
+
+    it('stops retrying failed recoveries once the retry cap is reached', async () => {
+        const { ctx, recoveredConn, spawnVtsls } = createVtslsRecoveryContext({ maxRestarts: 1 })
+        recoveredConn.sendRequest.mockRejectedValue(new Error('initialize failed'))
+
+        await expect(recoverVtsls(ctx, 'connection closed', () => {})).rejects.toThrow('initialize failed')
+        await new Promise((resolve) => setTimeout(resolve, 20))
+
+        expect(spawnVtsls).toHaveBeenCalledTimes(1)
+        expect((ctx.upstream as unknown as MockConnection).sendNotification).toHaveBeenCalledWith(
+            'window/showMessage',
+            expect.objectContaining({ message: expect.stringContaining('crashed too many times') })
+        )
+    })
 })
 
 describe('recoverVueLs', () => {
@@ -258,6 +287,17 @@ describe('recoverVueLs', () => {
 
         expect(didOpenCallsFor(recoveredConn, 'file:///workspace/b.vue')).toHaveLength(1)
         expect(didOpenCallsFor(recoveredConn, 'file:///workspace/a.ts')).toHaveLength(0)
+        expect(ctx.currentVueLs).toBe(recoveredConn)
+    })
+
+    it('still recovers vue_ls when the awaited vtsls recovery fails', async () => {
+        const { ctx, recoveredConn } = createVueLsRecoveryContext()
+        ctx.vtslsRecoveryPromise = Promise.reject(new Error('vtsls init boom'))
+        ctx.vtslsRecoveryPromise.catch(() => {})
+
+        await recoverVueLs(ctx, 'connection closed', () => {})
+
+        expect(recoveredConn.sendRequest).toHaveBeenCalledWith('initialize', expect.anything())
         expect(ctx.currentVueLs).toBe(recoveredConn)
     })
 

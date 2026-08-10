@@ -69,10 +69,11 @@ const VUE_LS_SPEC: RecoverySpec = {
     buildSettings: () => buildVueLsSettings(),
     replayFilter: isVueUri,
     // vue_ls sends tsserver/request during initialize, so any active vtsls recovery
-    // must finish before vue_ls comes back up.
+    // must finish before vue_ls comes back up. A failed vtsls recovery must not abort
+    // this one — vue_ls can still be useful and its retry budget is already spent.
     beforeSpawn: async (ctx) => {
         if (ctx.vtslsRecoveryPromise !== null) {
-            await ctx.vtslsRecoveryPromise
+            await ctx.vtslsRecoveryPromise.catch(() => {})
         }
     }
 }
@@ -154,8 +155,15 @@ function recoverServer(
             }
         } catch (err: unknown) {
             // The replacement never became usable; kill it and keep the old connection
-            // published so a later crash/timeout can trigger another attempt.
+            // published. The old connection's onClose has already fired, so nothing
+            // external will trigger another attempt — schedule one ourselves and let
+            // the retry cap decide when to give up.
             spawned.kill?.()
+            setTimeout(() => {
+                recoverServer(spec, ctx, `retry after failed recovery: ${String(err)}`, setupHandlers, false).catch((retryErr: unknown) => {
+                    logger.error('proxy', `${spec.server} recovery retry error: ${String(retryErr)}`)
+                })
+            }, ctx.delayMs)
             throw err
         }
 

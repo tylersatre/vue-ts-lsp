@@ -156,7 +156,13 @@ export function setupProxy(
         flushLogsAndExit()
     })
 
+    // SIGTERM and stdin EOF often arrive together; run the child shutdown only once.
+    let shutdownStarted = false
     const shutdownOnSignal = () => {
+        if (shutdownStarted) {
+            return
+        }
+        shutdownStarted = true
         void performShutdown().then(flushLogsAndExit, flushLogsAndExit)
     }
     if (activeShutdownSignalHandler !== null) {
