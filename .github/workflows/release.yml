@@ -28,6 +28,15 @@ jobs:
 
             - run: npm ci
 
+            # Same guard as CI: this workflow publishes, so it must never ship a
+            # stray stdout write (stdout is the JSON-RPC transport).
+            - name: Stdout safety check
+              run: |
+                  if grep -rnE 'console\.(log|info|warn|dir|table)|process\.stdout\.write' src/; then
+                    echo "::error::stdout-writing call found in source — stdout is the JSON-RPC transport"
+                    exit 1
+                  fi
+
             - name: Typecheck
               run: npm run typecheck
 
@@ -37,6 +46,10 @@ jobs:
             - name: Test
               run: npm test
 
+            # Publishing relies on npm trusted publishing (OIDC via id-token: write +
+            # npm >= 11 on Node 24) — there is deliberately no NPM_TOKEN here. It only
+            # works while the trusted-publisher entry for vue-ts-lsp exists on
+            # npmjs.com; if that entry is lost, this step fails with a bare auth error.
             - name: Create release PR or GitHub Release
               uses: changesets/action@v1
               with:
@@ -46,3 +59,4 @@ jobs:
                   publish: npm run release
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  NPM_CONFIG_PROVENANCE: true

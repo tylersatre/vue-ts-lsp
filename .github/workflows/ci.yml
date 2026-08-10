@@ -31,12 +31,18 @@ jobs:
 
             - run: npm ci
 
+            # stdout is the JSON-RPC transport: any stray write corrupts the protocol.
+            # The only legitimate process.stdout reference is the StreamMessageWriter
+            # in src/upstream.ts, which this pattern deliberately does not match.
             - name: Stdout safety check
               run: |
-                  if grep -rn 'console\.log' src/; then
-                    echo "::error::console.log found in source — stdout is the JSON-RPC transport"
+                  if grep -rnE 'console\.(log|info|warn|dir|table)|process\.stdout\.write' src/; then
+                    echo "::error::stdout-writing call found in source — stdout is the JSON-RPC transport"
                     exit 1
                   fi
+
+            - name: Format check
+              run: npm run format:check
 
             - name: Typecheck
               run: npm run typecheck
@@ -44,6 +50,6 @@ jobs:
             - name: Install smoke fixture dependencies
               run: npm run install:smoke-fixture
 
-            - name: Test
-              run: npm test
+            - name: Test (with coverage thresholds)
+              run: npm run test:coverage
               timeout-minutes: 10
