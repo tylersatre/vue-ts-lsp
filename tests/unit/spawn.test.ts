@@ -96,6 +96,20 @@ describe('spawnServer', () => {
         expect(exitSpy).toHaveBeenCalledWith(1)
     })
 
+    it('does not exit the process on spawn failure when exitOnProcessError is false', () => {
+        const mockChild = createMockChild()
+        vi.mocked(spawn).mockReturnValue(mockChild)
+
+        spawnServer('nonexistent-binary', ['--stdio'], { exitOnProcessError: false })
+
+        expect(() => {
+            mockChild.emit('error', new Error('spawn nonexistent-binary ENOENT'))
+        }).not.toThrow()
+
+        expect(exitSpy).not.toHaveBeenCalled()
+        expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('Failed to spawn nonexistent-binary'))
+    })
+
     it('logs an error message before exiting on spawn failure', () => {
         const mockChild = createMockChild()
         vi.mocked(spawn).mockReturnValue(mockChild)

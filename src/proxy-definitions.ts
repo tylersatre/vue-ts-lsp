@@ -2,13 +2,14 @@ import { pathToFileURL } from 'node:url'
 import type { MessageConnection } from 'vscode-jsonrpc/node'
 import type { Position, Range } from 'vscode-languageserver-protocol'
 import type { ProxyContext } from './proxy-context.js'
-import { VUE_DEFINITION_TIMEOUT_MS, VUE_DEFINITION_RETRY_DELAY_MS, VUE_PROJECT_WARMUP_DELAY_MS, DownstreamRequestTimeoutError } from './proxy-types.js'
-import { isVueUri, isScriptLikeUri, isPosition, uriToFilePath } from './proxy-utils.js'
-import { sendDownstreamRequest, executeTsserverCommand, maybeRecoverVtslsAfterTimeout } from './proxy-communication.js'
+import { VUE_DEFINITION_TIMEOUT_MS, VUE_DEFINITION_RETRY_DELAY_MS, VUE_PROJECT_WARMUP_DELAY_MS } from './proxy-types.js'
+import { isVueUri, isScriptLikeUri, uriToFilePath } from './proxy-utils.js'
+import { safeSendNotification, sendDownstreamRequest, executeTsserverCommand, maybeRecoverVtslsAfterTimeout, tryRequest } from './proxy-communication.js'
 import { getDocumentText, resolveWorkspaceModuleSpecifier } from './proxy-workspace.js'
 import { classifyDefinitionResult, normalizeDefinitionResult, preferDefinitionResult } from './helpers/definitions.js'
 import { findVueImportAtPosition, normalizeVueImportPosition, findImportAtPosition, normalizeImportPosition, findImportByLocalName } from './helpers/imports.js'
 import { createDefinitionProbe, isInternalProbeUri } from './helpers/probes.js'
+import { extractRequestPosition } from './helpers/identifiers.js'
 import { findStoreToRefsBindingAtPosition, findPiniaStoreReturnedSymbol } from './helpers/pinia.js'
 import { findVueTemplateComponentAtPosition, normalizeVueTemplateExpressionPosition } from './helpers/vue-template.js'
 import { rewriteExternalDefinitionResult } from './definition-mirrors.js'
@@ -37,7 +38,8 @@ export function buildNormalizedVueTemplateParams(
     requestUri: string,
     params: unknown
 ): { params: unknown; normalizedPosition: Position } | null {
-    if (params === null || typeof params !== 'object' || !('position' in params) || !isPosition((params as { position: unknown }).position)) {
+    const requestPosition = extractRequestPosition(params)
+    if (requestPosition === null) {
         return null
     }
 
@@ -46,12 +48,8 @@ export function buildNormalizedVueTemplateParams(
         return null
     }
 
-    const normalizedPosition = normalizeVueTemplateExpressionPosition(text, (params as { position: Position }).position)
-    if (
-        normalizedPosition === null ||
-        (normalizedPosition.line === (params as { position: Position }).position.line &&
-            normalizedPosition.character === (params as { position: Position }).position.character)
-    ) {
+    const normalizedPosition = normalizeVueTemplateExpressionPosition(text, requestPosition)
+    if (normalizedPosition === null || (normalizedPosition.line === requestPosition.line && normalizedPosition.character === requestPosition.character)) {
         return null
     }
 
@@ -83,7 +81,8 @@ export function hasVueShimDefinition(result: unknown): boolean {
 }
 
 export function requestTemplateComponentDefinitionFallback(ctx: ProxyContext, requestUri: string, params: unknown): unknown | null {
-    if (params === null || typeof params !== 'object' || !('position' in params) || !isPosition((params as { position: unknown }).position)) {
+    const requestPosition = extractRequestPosition(params)
+    if (requestPosition === null) {
         return null
     }
 
@@ -92,7 +91,7 @@ export function requestTemplateComponentDefinitionFallback(ctx: ProxyContext, re
         return null
     }
 
-    const componentName = findVueTemplateComponentAtPosition(text, (params as { position: Position }).position)
+    const componentName = findVueTemplateComponentAtPosition(text, requestPosition)
     if (componentName === null) {
         return null
     }
@@ -159,24 +158,13 @@ export function finalizeDefinitionResult(ctx: ProxyContext, requestUri: string |
     return rewritten.result
 }
 
-export async function tryDefinitionRequest(
+export function tryDefinitionRequest(
     ctx: ProxyContext,
     target: 'vtsls' | 'vue_ls',
     params: unknown,
     timeoutMs = Math.min(ctx.requestTimeoutMs, VUE_DEFINITION_TIMEOUT_MS)
 ): Promise<{ result: unknown; timedOut: boolean }> {
-    try {
-        const result = await sendDownstreamRequest(ctx, target, 'textDocument/definition', params, {
-            retryOnTimeout: false,
-            timeoutMs
-        })
-        return { result, timedOut: false }
-    } catch (err: unknown) {
-        if (err instanceof DownstreamRequestTimeoutError) {
-            return { result: null, timedOut: true }
-        }
-        throw err
-    }
+    return tryRequest(ctx, target, 'textDocument/definition', params, timeoutMs)
 }
 
 export async function requestVueLsDefinitionFallback(ctx: ProxyContext, requestUri: string, params: unknown, reason: string): Promise<unknown | null> {
@@ -203,7 +191,8 @@ export async function requestVueLsDefinitionFallback(ctx: ProxyContext, requestU
 }
 
 export async function requestImportDefinitionProbe(ctx: ProxyContext, requestUri: string, params: unknown): Promise<unknown | null> {
-    if (params === null || typeof params !== 'object' || !('position' in params) || !isPosition((params as { position: unknown }).position)) {
+    const requestPosition = extractRequestPosition(params)
+    if (requestPosition === null) {
         return null
     }
 
@@ -213,7 +202,7 @@ export async function requestImportDefinitionProbe(ctx: ProxyContext, requestUri
         return null
     }
 
-    const { importTarget } = resolveImportTargetForRequest(requestUri, text, (params as { position: Position }).position)
+    const { importTarget } = resolveImportTargetForRequest(requestUri, text, requestPosition)
     if (importTarget === null) {
         logger.debug('proxy', `textDocument/definition probe skipped uri=${requestUri} reason=not-an-import`)
         return null
@@ -225,7 +214,7 @@ export async function requestImportDefinitionProbe(ctx: ProxyContext, requestUri
         `textDocument/definition probe open uri=${requestUri} probe=${probe.uri} module=${importTarget.moduleSpecifier} import=${importTarget.localName}`
     )
 
-    ctx.currentVtsls.sendNotification('textDocument/didOpen', {
+    safeSendNotification(ctx.currentVtsls, 'textDocument/didOpen', {
         textDocument: {
             uri: probe.uri,
             languageId: 'typescript',
@@ -249,18 +238,19 @@ export async function requestImportDefinitionProbe(ctx: ProxyContext, requestUri
         logger.warn('proxy', `textDocument/definition probe ${requestUri} ERROR: ${msg}`)
         return null
     } finally {
-        ctx.currentVtsls.sendNotification('textDocument/didClose', {
+        safeSendNotification(ctx.currentVtsls, 'textDocument/didClose', {
             textDocument: { uri: probe.uri }
         })
     }
 }
 
 export async function requestImportSourceDefinition(ctx: ProxyContext, requestUri: string, params: unknown): Promise<unknown | null> {
-    if (params === null || typeof params !== 'object' || !('position' in params) || !isPosition((params as { position: unknown }).position)) {
+    const requestPosition = extractRequestPosition(params)
+    if (requestPosition === null) {
         return null
     }
 
-    const originalPosition = (params as { position: Position }).position
+    const originalPosition = requestPosition
     const text = getDocumentText(ctx, requestUri)
     if (text === null) {
         logger.debug('proxy', `textDocument/definition sourceDefinition skipped uri=${requestUri} reason=no-document-text`)
@@ -303,7 +293,8 @@ export async function requestImportSourceDefinition(ctx: ProxyContext, requestUr
 }
 
 export function requestScriptStoreToRefsDefinitionFallback(ctx: ProxyContext, requestUri: string, params: unknown): unknown | null {
-    if (params === null || typeof params !== 'object' || !('position' in params) || !isPosition((params as { position: unknown }).position)) {
+    const requestPosition = extractRequestPosition(params)
+    if (requestPosition === null) {
         return null
     }
 
@@ -312,7 +303,7 @@ export function requestScriptStoreToRefsDefinitionFallback(ctx: ProxyContext, re
         return null
     }
 
-    const binding = findStoreToRefsBindingAtPosition(text, (params as { position: Position }).position)
+    const binding = findStoreToRefsBindingAtPosition(text, requestPosition)
     if (binding === null || binding.storeFactoryName === null) {
         return null
     }

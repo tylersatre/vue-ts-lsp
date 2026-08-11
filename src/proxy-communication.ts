@@ -15,6 +15,25 @@ import { classifyDefinitionResult } from './helpers/definitions.js'
 import { isDefinitionMirrorUri } from './definition-mirrors.js'
 import * as logger from './logger.js'
 
+/**
+ * sendNotification returns a promise that rejects asynchronously when the underlying
+ * write fails (e.g. EPIPE to a crashed child). Every notification send must go through
+ * here: an unhandled rejection would terminate the whole proxy process.
+ */
+export function safeSendNotification(conn: MessageConnection, method: string, params?: unknown, label?: string): void {
+    const logFailure = (err: unknown): void => {
+        const msg = err instanceof Error ? err.message : String(err)
+        logger.warn('proxy', `${label ?? `sendNotification ${method}`} dropped: ${msg}`)
+    }
+    try {
+        // Preserve call arity: some notifications (e.g. `exit`) carry no params.
+        const sent = params === undefined ? conn.sendNotification(method) : conn.sendNotification(method, params)
+        void Promise.resolve(sent).catch(logFailure)
+    } catch (err: unknown) {
+        logFailure(err)
+    }
+}
+
 export function logDiagnostics(server: 'vtsls' | 'vue_ls', uri: string, count: number, mergedCount?: number): void {
     const merged = mergedCount === undefined ? '' : ` merged=${mergedCount}`
     logger.debug('proxy', `publishDiagnostics ${server} uri=${uri} count=${count}${merged}`)
@@ -199,6 +218,31 @@ export async function sendDownstreamRequest(
                 ctx.activeForegroundVtslsRequests = Math.max(0, ctx.activeForegroundVtslsRequests - 1)
             }
         }
+    }
+}
+
+/**
+ * One-shot downstream request that reports a timeout as data instead of throwing —
+ * the retry ladders in the definition/hover modules branch on `timedOut`.
+ */
+export async function tryRequest(
+    ctx: ProxyContext,
+    target: DownstreamTarget,
+    method: string,
+    params: unknown,
+    timeoutMs: number
+): Promise<{ result: unknown; timedOut: boolean }> {
+    try {
+        const result = await sendDownstreamRequest(ctx, target, method, params, {
+            retryOnTimeout: false,
+            timeoutMs
+        })
+        return { result, timedOut: false }
+    } catch (err: unknown) {
+        if (err instanceof DownstreamRequestTimeoutError) {
+            return { result: null, timedOut: true }
+        }
+        throw err
     }
 }
 

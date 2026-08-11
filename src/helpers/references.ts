@@ -17,6 +17,7 @@ import { findNodeAtOffset, collectParseTargets, getExtension, isFunctionLikeInit
 import { isIdentifierChar, extractIdentifierAtPosition } from './identifiers.js'
 import { collectVueTemplateIdentifierRanges } from './vue-template.js'
 import { findVueTemplateComponentAtPosition } from './vue-template.js'
+import { normalizeUriIdentity } from './uri.js'
 
 function rangeForIdentifierAtPosition(text: string, position: Position): Range | null {
     const offset = lineCharToOffset(text, position)
@@ -212,6 +213,69 @@ export function findEnclosingReferenceTargetAtPosition(uri: string, text: string
     return best
 }
 
+// One TS parse serves every identifier query against the same text: the workspace
+// reference fallback asks about up to 3 identifiers per file per edit, and a fresh
+// parse per identifier was the dominant per-edit cost. Content-validated (a text
+// mismatch reparses), so staleness is impossible. Resident memory is bounded by the
+// entry cap (the hard limit — there is no timer, so a fully idle session retains up
+// to that many entries) plus per-URI eviction and an expired-entry sweep, both wired
+// in from document lifecycle events by proxy-workspace.
+const IDENTIFIER_INDEX_CACHE_MAX_ENTRIES = 2048
+const IDENTIFIER_INDEX_CACHE_TTL_MS = 5_000
+const identifierIndexCache = new Map<string, { text: string; index: Map<string, Range[]>; cachedAt: number }>()
+
+export function deleteIdentifierIndexEntry(uri: string): void {
+    identifierIndexCache.delete(normalizeUriIdentity(uri))
+}
+
+export function sweepIdentifierIndexCache(): void {
+    const now = Date.now()
+    for (const [uri, entry] of identifierIndexCache) {
+        if (now - entry.cachedAt > IDENTIFIER_INDEX_CACHE_TTL_MS) {
+            identifierIndexCache.delete(uri)
+        }
+    }
+}
+
+export function getIdentifierIndex(uri: string, text: string): Map<string, Range[]> {
+    const identity = normalizeUriIdentity(uri)
+    const cached = identifierIndexCache.get(identity)
+    if (cached !== undefined && cached.text === text) {
+        cached.cachedAt = Date.now()
+        return cached.index
+    }
+
+    const index = new Map<string, Range[]>()
+    for (const target of collectParseTargets(uri, text)) {
+        const sourceFile = ts.createSourceFile(target.filename, target.content, ts.ScriptTarget.Latest, true, target.scriptKind)
+
+        const visit = (node: ts.Node): void => {
+            if (ts.isIdentifier(node)) {
+                const start = target.contentStart + node.getStart(sourceFile)
+                const end = target.contentStart + node.getEnd()
+                const ranges = index.get(node.text)
+                if (ranges === undefined) {
+                    index.set(node.text, [offsetsToRange(text, start, end)])
+                } else {
+                    ranges.push(offsetsToRange(text, start, end))
+                }
+            }
+            ts.forEachChild(node, visit)
+        }
+
+        visit(sourceFile)
+    }
+
+    if (identifierIndexCache.size >= IDENTIFIER_INDEX_CACHE_MAX_ENTRIES) {
+        sweepIdentifierIndexCache()
+        if (identifierIndexCache.size >= IDENTIFIER_INDEX_CACHE_MAX_ENTRIES) {
+            identifierIndexCache.clear()
+        }
+    }
+    identifierIndexCache.set(identity, { text, index, cachedAt: Date.now() })
+    return index
+}
+
 export function collectIdentifierReferencesInDocument(uri: string, text: string, identifier: string): Array<{ uri: string; range: Range }> {
     const locations: Array<{ uri: string; range: Range }> = []
     const seen = new Set<string>()
@@ -225,19 +289,8 @@ export function collectIdentifierReferencesInDocument(uri: string, text: string,
         locations.push({ uri, range })
     }
 
-    for (const target of collectParseTargets(uri, text)) {
-        const sourceFile = ts.createSourceFile(target.filename, target.content, ts.ScriptTarget.Latest, true, target.scriptKind)
-
-        const visit = (node: ts.Node): void => {
-            if (ts.isIdentifier(node) && node.text === identifier) {
-                const start = target.contentStart + node.getStart(sourceFile)
-                const end = target.contentStart + node.getEnd()
-                pushLocation(offsetsToRange(text, start, end))
-            }
-            ts.forEachChild(node, visit)
-        }
-
-        visit(sourceFile)
+    for (const range of getIdentifierIndex(uri, text).get(identifier) ?? []) {
+        pushLocation(range)
     }
 
     if (getExtension(uri) === '.vue') {

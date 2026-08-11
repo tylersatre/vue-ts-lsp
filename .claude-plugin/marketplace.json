@@ -8,7 +8,20 @@
         {
             "name": "vue-ts-lsp",
             "source": "./",
-            "description": "Vue + TypeScript LSP for Claude Code"
+            "description": "Vue + TypeScript LSP for Claude Code",
+            "lspServers": {
+                "vue-ts-lsp": {
+                    "command": "vue-ts-lsp",
+                    "extensionToLanguage": {
+                        ".vue": "vue",
+                        ".ts": "typescript",
+                        ".tsx": "typescriptreact",
+                        ".js": "javascript",
+                        ".jsx": "javascriptreact"
+                    },
+                    "startupTimeout": 30000
+                }
+            }
         }
     ]
 }

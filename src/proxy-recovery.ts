@@ -1,141 +1,254 @@
 import type { MessageConnection } from 'vscode-jsonrpc/node'
 import type { ProxyContext } from './proxy-context.js'
 import { normalizeSpawnedConnection, buildVtslsInitParams, buildVtslsSettings, buildVueLsInitParams, buildVueLsSettings, isVueUri } from './proxy-utils.js'
+import { safeSendNotification } from './proxy-communication.js'
 import * as logger from './logger.js'
 
-export function setupVtslsCrashRecovery(ctx: ProxyContext, conn: MessageConnection, recoverFn: (reason: string, forceKill?: boolean) => Promise<void>): void {
-    if (!ctx.crashOptions?.spawnVtsls) return
+type RecoverFn = (reason: string, forceKill?: boolean) => Promise<void>
+
+/** Everything that differs between the vtsls and vue_ls recovery paths. */
+interface RecoverySpec {
+    server: 'vtsls' | 'vue_ls'
+    crashMessage: string
+    canSpawn: (ctx: ProxyContext) => boolean
+    spawn: (ctx: ProxyContext) => ReturnType<typeof normalizeSpawnedConnection>
+    getRetry: (ctx: ProxyContext) => ProxyContext['vtslsRetry']
+    getRecoveryPromise: (ctx: ProxyContext) => Promise<void> | null
+    setRecoveryPromise: (ctx: ProxyContext, promise: Promise<void> | null) => void
+    getConsecutiveFailures: (ctx: ProxyContext) => number
+    setConsecutiveFailures: (ctx: ProxyContext, count: number) => void
+    getCurrentConn: (ctx: ProxyContext) => MessageConnection
+    killCurrent: (ctx: ProxyContext) => void
+    publish: (ctx: ProxyContext, conn: MessageConnection, kill: (() => void) | undefined) => void
+    setDiagnosticsConnection: (ctx: ProxyContext, conn: MessageConnection | null) => void
+    buildInitParams: (ctx: ProxyContext) => unknown | null
+    buildSettings: (ctx: ProxyContext) => unknown
+    replayFilter: (uri: string) => boolean
+    /** Runs after the restart delay, before spawning the replacement. */
+    beforeSpawn?: (ctx: ProxyContext) => Promise<void>
+}
+
+const VTSLS_SPEC: RecoverySpec = {
+    server: 'vtsls',
+    crashMessage: 'vue-ts-lsp: vtsls has crashed too many times and will not be restarted. Please reload your editor.',
+    canSpawn: (ctx) => ctx.crashOptions?.spawnVtsls !== undefined,
+    spawn: (ctx) => normalizeSpawnedConnection(ctx.crashOptions!.spawnVtsls!()),
+    getRetry: (ctx) => ctx.vtslsRetry,
+    getRecoveryPromise: (ctx) => ctx.vtslsRecoveryPromise,
+    setRecoveryPromise: (ctx, promise) => {
+        ctx.vtslsRecoveryPromise = promise
+    },
+    getConsecutiveFailures: (ctx) => ctx.vtslsConsecutiveRecoveryFailures,
+    setConsecutiveFailures: (ctx, count) => {
+        ctx.vtslsConsecutiveRecoveryFailures = count
+    },
+    getCurrentConn: (ctx) => ctx.currentVtsls,
+    killCurrent: (ctx) => ctx.currentKillVtsls?.(),
+    publish: (ctx, conn, kill) => {
+        ctx.currentVtsls = conn
+        ctx.currentKillVtsls = kill ?? ctx.currentKillVtsls
+        ctx.vtslsDiagnosticsConnection = conn
+        ctx.vtslsInitialized = true
+    },
+    setDiagnosticsConnection: (ctx, conn) => {
+        ctx.vtslsDiagnosticsConnection = conn
+    },
+    buildInitParams: (ctx) =>
+        ctx.savedInitParams !== null && ctx.savedVueTypescriptPluginLocation !== null
+            ? buildVtslsInitParams(ctx.savedInitParams, ctx.savedVueTypescriptPluginLocation)
+            : null,
+    buildSettings: (ctx) => buildVtslsSettings(ctx.savedVueTypescriptPluginLocation!),
+    replayFilter: () => true
+}
+
+const VUE_LS_SPEC: RecoverySpec = {
+    server: 'vue_ls',
+    crashMessage: 'vue-ts-lsp: vue-language-server has crashed too many times and will not be restarted. Please reload your editor.',
+    canSpawn: (ctx) => ctx.crashOptions?.spawnVueLs !== undefined,
+    spawn: (ctx) => normalizeSpawnedConnection(ctx.crashOptions!.spawnVueLs!()),
+    getRetry: (ctx) => ctx.vueLsRetry,
+    getRecoveryPromise: (ctx) => ctx.vueLsRecoveryPromise,
+    setRecoveryPromise: (ctx, promise) => {
+        ctx.vueLsRecoveryPromise = promise
+    },
+    getConsecutiveFailures: (ctx) => ctx.vueLsConsecutiveRecoveryFailures,
+    setConsecutiveFailures: (ctx, count) => {
+        ctx.vueLsConsecutiveRecoveryFailures = count
+    },
+    getCurrentConn: (ctx) => ctx.currentVueLs,
+    killCurrent: (ctx) => ctx.currentKillVueLs?.(),
+    publish: (ctx, conn, kill) => {
+        ctx.currentVueLs = conn
+        ctx.currentKillVueLs = kill ?? ctx.currentKillVueLs
+        ctx.vueLsDiagnosticsConnection = conn
+    },
+    setDiagnosticsConnection: (ctx, conn) => {
+        ctx.vueLsDiagnosticsConnection = conn
+    },
+    buildInitParams: (ctx) => (ctx.savedInitParams !== null ? buildVueLsInitParams(ctx.savedInitParams) : null),
+    buildSettings: () => buildVueLsSettings(),
+    replayFilter: isVueUri,
+    // vue_ls sends tsserver/request during initialize. The vtsls recovery promise now
+    // spans its complete bounded retry chain, so success means the published bridge is
+    // ready and rejection means Vue must fail closed rather than initialize degraded.
+    beforeSpawn: async (ctx) => {
+        const activeVtslsRecovery = ctx.vtslsRecoveryPromise
+        if (activeVtslsRecovery !== null) {
+            await activeVtslsRecovery
+        }
+        if (!ctx.vtslsInitialized) {
+            throw new Error('vue_ls recovery blocked because vtsls is not initialized')
+        }
+    }
+}
+
+function setupCrashRecoveryFor(spec: RecoverySpec, ctx: ProxyContext, conn: MessageConnection, recoverFn: RecoverFn): void {
+    if (!spec.canSpawn(ctx)) return
     conn.onClose(() => {
-        if (conn !== ctx.currentVtsls) {
+        if (ctx.intentionalRecoveryCloses.delete(conn)) {
+            logger.debug('proxy', `${spec.server} ignored intentional recovery close`)
+            return
+        }
+        if (conn !== spec.getCurrentConn(ctx)) {
             return
         }
         recoverFn('connection closed').catch((err: unknown) => {
-            logger.error('proxy', `vtsls recovery error: ${String(err)}`)
+            logger.error('proxy', `${spec.server} recovery error: ${String(err)}`)
         })
     })
 }
 
-export function setupVueLsCrashRecovery(ctx: ProxyContext, conn: MessageConnection, recoverFn: (reason: string, forceKill?: boolean) => Promise<void>): void {
-    if (!ctx.crashOptions?.spawnVueLs) return
-    conn.onClose(() => {
-        if (conn !== ctx.currentVueLs) {
-            return
-        }
-        recoverFn('connection closed').catch((err: unknown) => {
-            logger.error('proxy', `vue_ls recovery error: ${String(err)}`)
-        })
+function notifyRetryCap(spec: RecoverySpec, ctx: ProxyContext): void {
+    const retry = spec.getRetry(ctx)
+    logger.error(
+        'proxy',
+        `${spec.server}: retry cap reached (max ${retry.maxRestarts} in ${retry.windowMs / 1000}s, consecutive=${spec.getConsecutiveFailures(ctx)})`
+    )
+    safeSendNotification(ctx.upstream, 'window/showMessage', {
+        type: 1,
+        message: spec.crashMessage
     })
 }
 
-export async function recoverVtsls(ctx: ProxyContext, reason: string, setupHandlers: (conn: MessageConnection) => void, forceKill = false): Promise<void> {
-    if (ctx.vtslsRecoveryPromise !== null) {
-        return ctx.vtslsRecoveryPromise
+function disposeFailedCandidate(spec: RecoverySpec, spawned: ReturnType<typeof normalizeSpawnedConnection>): void {
+    try {
+        spawned.kill?.()
+    } catch (err: unknown) {
+        logger.warn('proxy', `${spec.server} failed candidate kill error: ${String(err)}`)
+    }
+    try {
+        spawned.conn.dispose()
+    } catch (err: unknown) {
+        logger.warn('proxy', `${spec.server} failed candidate dispose error: ${String(err)}`)
+    }
+}
+
+function observeCandidateClose(conn: MessageConnection): { closed: Promise<void>; isClosed: () => boolean } {
+    let didClose = false
+    let resolveClose!: () => void
+    const closed = new Promise<void>((resolve) => {
+        resolveClose = resolve
+    })
+    conn.onClose(() => {
+        if (!didClose) {
+            didClose = true
+            resolveClose()
+        }
+    })
+    return { closed, isClosed: () => didClose }
+}
+
+async function initializeCandidate(spec: RecoverySpec, ctx: ProxyContext, conn: MessageConnection, initParams: unknown, closed: Promise<void>): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | null = null
+    try {
+        await Promise.race([
+            conn.sendRequest('initialize', initParams),
+            closed.then(() => {
+                throw new Error(`${spec.server} replacement connection closed during initialization`)
+            }),
+            new Promise<never>((_, reject) => {
+                timer = setTimeout(() => {
+                    reject(new Error(`${spec.server} replacement initialize timed out after ${ctx.requestTimeoutMs}ms`))
+                }, ctx.requestTimeoutMs)
+            })
+        ])
+    } finally {
+        if (timer !== null) {
+            clearTimeout(timer)
+        }
+    }
+}
+
+function candidateClosedError(spec: RecoverySpec): Error {
+    return new Error(`${spec.server} replacement connection closed before publication`)
+}
+
+async function runRecoveryChain(
+    spec: RecoverySpec,
+    ctx: ProxyContext,
+    initialReason: string,
+    setupHandlers: (conn: MessageConnection) => void,
+    forceKill: boolean
+): Promise<void> {
+    const retry = spec.getRetry(ctx)
+    let reason = initialReason
+    let lastError: unknown = null
+    let shouldForceKill = forceKill
+
+    // Supersede the old diagnostic generation before the recovery delay. This keeps
+    // a timed-out child from repopulating the store while it is awaiting SIGTERM.
+    spec.setDiagnosticsConnection(ctx, null)
+    ctx.diagnosticsStore.clearServer(spec.server)
+    if (spec.server === 'vtsls') {
+        ctx.vtslsInitialized = false
     }
 
-    ctx.vtslsRecoveryPromise = (async () => {
-        logger.info('proxy', `vtsls recovery starting reason=${reason}`)
+    while (true) {
+        logger.info('proxy', `${spec.server} recovery starting reason=${reason}`)
 
-        if (!ctx.vtslsRetry.canRestart()) {
-            logger.error('proxy', `vtsls: retry cap reached (max ${ctx.vtslsRetry.maxRestarts} in ${ctx.vtslsRetry.windowMs / 1000}s)`)
-            ctx.upstream.sendNotification('window/showMessage', {
-                type: 1,
-                message: 'vue-ts-lsp: vtsls has crashed too many times and will not be restarted. Please reload your editor.'
-            })
-            return
+        // Two independent bounds: the sliding window catches rapid crash bursts, and
+        // the consecutive counter catches slow failed-initialize/short-lived cycles.
+        if (spec.getConsecutiveFailures(ctx) >= retry.maxRestarts || !retry.canRestart()) {
+            notifyRetryCap(spec, ctx)
+            throw lastError instanceof Error ? lastError : new Error(`${spec.server} recovery retry cap reached`)
         }
-
-        if (forceKill) {
-            ctx.currentKillVtsls?.()
-        }
-
-        // The dead server's stored diagnostics are stale; drop them so .vue merges
-        // don't blend pre-crash entries with the other server's fresh publishes.
-        ctx.diagnosticsStore.clearServer('vtsls')
 
         await new Promise<void>((resolve) => setTimeout(resolve, ctx.delayMs))
 
-        const spawned = normalizeSpawnedConnection(ctx.crashOptions!.spawnVtsls!())
-        ctx.currentVtsls = spawned.conn
-        ctx.currentKillVtsls = spawned.kill ?? ctx.currentKillVtsls
-        ctx.currentVtsls.listen()
-        setupHandlers(ctx.currentVtsls)
-
-        if (ctx.savedInitParams !== null && ctx.savedVueTypescriptPluginLocation !== null) {
-            await ctx.currentVtsls.sendRequest('initialize', buildVtslsInitParams(ctx.savedInitParams, ctx.savedVueTypescriptPluginLocation))
-            ctx.currentVtsls.sendNotification('initialized', {})
-            ctx.currentVtsls.sendNotification('workspace/didChangeConfiguration', {
-                settings: buildVtslsSettings(ctx.savedVueTypescriptPluginLocation)
-            })
+        if (shouldForceKill) {
+            // Keep the connection marked until its close is actually observed. A
+            // replacement can fail before SIGTERM produces onClose.
+            ctx.intentionalRecoveryCloses.add(spec.getCurrentConn(ctx))
+            spec.killCurrent(ctx)
+            shouldForceKill = false
         }
 
-        for (const [uri, doc] of ctx.documentStore.getAll()) {
-            ctx.currentVtsls.sendNotification('textDocument/didOpen', {
-                textDocument: {
-                    uri,
-                    languageId: doc.languageId,
-                    version: doc.version,
-                    text: doc.content
+        // For Vue this awaits the entire active vtsls retry chain and deliberately
+        // rejects on permanent vtsls failure, before any Vue candidate is spawned.
+        await spec.beforeSpawn?.(ctx)
+
+        const spawned = spec.spawn(ctx)
+        const closeGuard = observeCandidateClose(spawned.conn)
+
+        try {
+            spawned.conn.listen()
+            setupHandlers(spawned.conn)
+
+            const initParams = spec.buildInitParams(ctx)
+            if (initParams !== null) {
+                await initializeCandidate(spec, ctx, spawned.conn, initParams, closeGuard.closed)
+                if (closeGuard.isClosed()) throw candidateClosedError(spec)
+                safeSendNotification(spawned.conn, 'initialized', {})
+                safeSendNotification(spawned.conn, 'workspace/didChangeConfiguration', {
+                    settings: spec.buildSettings(ctx)
+                })
+            }
+
+            for (const [uri, doc] of ctx.documentStore.getAll()) {
+                if (!spec.replayFilter(uri)) {
+                    continue
                 }
-            })
-        }
-
-        logger.info('proxy', 'vtsls restarted successfully')
-        setupVtslsCrashRecovery(ctx, ctx.currentVtsls, (r, fk) => recoverVtsls(ctx, r, setupHandlers, fk))
-    })().finally(() => {
-        ctx.vtslsRecoveryPromise = null
-    })
-
-    return ctx.vtslsRecoveryPromise
-}
-
-export async function recoverVueLs(ctx: ProxyContext, reason: string, setupHandlers: (conn: MessageConnection) => void, forceKill = false): Promise<void> {
-    if (ctx.vueLsRecoveryPromise !== null) {
-        return ctx.vueLsRecoveryPromise
-    }
-
-    ctx.vueLsRecoveryPromise = (async () => {
-        logger.info('proxy', `vue_ls recovery starting reason=${reason}`)
-
-        if (!ctx.vueLsRetry.canRestart()) {
-            logger.error('proxy', `vue_ls: retry cap reached (max ${ctx.vueLsRetry.maxRestarts} in ${ctx.vueLsRetry.windowMs / 1000}s)`)
-            ctx.upstream.sendNotification('window/showMessage', {
-                type: 1,
-                message: 'vue-ts-lsp: vue-language-server has crashed too many times and will not be restarted. Please reload your editor.'
-            })
-            return
-        }
-
-        if (forceKill) {
-            ctx.currentKillVueLs?.()
-        }
-
-        ctx.diagnosticsStore.clearServer('vue_ls')
-
-        await new Promise<void>((resolve) => setTimeout(resolve, ctx.delayMs))
-
-        // vue_ls sends tsserver/request during initialize, so any active vtsls recovery
-        // must finish before vue_ls comes back up.
-        if (ctx.vtslsRecoveryPromise !== null) {
-            await ctx.vtslsRecoveryPromise
-        }
-
-        const spawned = normalizeSpawnedConnection(ctx.crashOptions!.spawnVueLs!())
-        ctx.currentVueLs = spawned.conn
-        ctx.currentKillVueLs = spawned.kill ?? ctx.currentKillVueLs
-        ctx.currentVueLs.listen()
-        setupHandlers(ctx.currentVueLs)
-
-        if (ctx.savedInitParams !== null) {
-            await ctx.currentVueLs.sendRequest('initialize', buildVueLsInitParams(ctx.savedInitParams))
-            ctx.currentVueLs.sendNotification('initialized', {})
-            ctx.currentVueLs.sendNotification('workspace/didChangeConfiguration', {
-                settings: buildVueLsSettings()
-            })
-        }
-
-        for (const [uri, doc] of ctx.documentStore.getAll()) {
-            if (isVueUri(uri)) {
-                ctx.currentVueLs.sendNotification('textDocument/didOpen', {
+                safeSendNotification(spawned.conn, 'textDocument/didOpen', {
                     textDocument: {
                         uri,
                         languageId: doc.languageId,
@@ -144,13 +257,73 @@ export async function recoverVueLs(ctx: ProxyContext, reason: string, setupHandl
                     }
                 })
             }
+
+            if (closeGuard.isClosed()) throw candidateClosedError(spec)
+
+            // Install the post-publication crash observer before publishing. The
+            // candidate close guard makes a close in this narrow window fail the
+            // attempt rather than publishing an already-closed connection.
+            const publishedAt = Date.now()
+            setupCrashRecoveryFor(spec, ctx, spawned.conn, (nextReason, nextForceKill) => {
+                if (Date.now() - publishedAt >= ctx.recoveryStabilityWindowMs) {
+                    spec.setConsecutiveFailures(ctx, 0)
+                } else {
+                    spec.setConsecutiveFailures(ctx, spec.getConsecutiveFailures(ctx) + 1)
+                }
+                return recoverServer(spec, ctx, nextReason, setupHandlers, nextForceKill ?? false)
+            })
+            if (closeGuard.isClosed()) throw candidateClosedError(spec)
+
+            // Publish exactly once, after initialize, replay, and close-listener setup.
+            spec.publish(ctx, spawned.conn, spawned.kill)
+            logger.info('proxy', `${spec.server} restarted successfully`)
+            return
+        } catch (err: unknown) {
+            disposeFailedCandidate(spec, spawned)
+            lastError = err
+            const failures = spec.getConsecutiveFailures(ctx) + 1
+            spec.setConsecutiveFailures(ctx, failures)
+            if (failures >= retry.maxRestarts) {
+                logger.error('proxy', `${spec.server}: ${failures} consecutive failed recovery attempts; giving up`)
+                notifyRetryCap(spec, ctx)
+                throw err
+            }
+            reason = `retry after failed recovery: ${String(err)}`
         }
+    }
+}
 
-        logger.info('proxy', 'vue_ls restarted successfully')
-        setupVueLsCrashRecovery(ctx, ctx.currentVueLs, (r, fk) => recoverVueLs(ctx, r, setupHandlers, fk))
-    })().finally(() => {
-        ctx.vueLsRecoveryPromise = null
+function recoverServer(
+    spec: RecoverySpec,
+    ctx: ProxyContext,
+    reason: string,
+    setupHandlers: (conn: MessageConnection) => void,
+    forceKill: boolean
+): Promise<void> {
+    const active = spec.getRecoveryPromise(ctx)
+    if (active !== null) {
+        return active
+    }
+
+    const recovery = runRecoveryChain(spec, ctx, reason, setupHandlers, forceKill).finally(() => {
+        spec.setRecoveryPromise(ctx, null)
     })
+    spec.setRecoveryPromise(ctx, recovery)
+    return recovery
+}
 
-    return ctx.vueLsRecoveryPromise
+export function setupVtslsCrashRecovery(ctx: ProxyContext, conn: MessageConnection, recoverFn: RecoverFn): void {
+    setupCrashRecoveryFor(VTSLS_SPEC, ctx, conn, recoverFn)
+}
+
+export function setupVueLsCrashRecovery(ctx: ProxyContext, conn: MessageConnection, recoverFn: RecoverFn): void {
+    setupCrashRecoveryFor(VUE_LS_SPEC, ctx, conn, recoverFn)
+}
+
+export function recoverVtsls(ctx: ProxyContext, reason: string, setupHandlers: (conn: MessageConnection) => void, forceKill = false): Promise<void> {
+    return recoverServer(VTSLS_SPEC, ctx, reason, setupHandlers, forceKill)
+}
+
+export function recoverVueLs(ctx: ProxyContext, reason: string, setupHandlers: (conn: MessageConnection) => void, forceKill = false): Promise<void> {
+    return recoverServer(VUE_LS_SPEC, ctx, reason, setupHandlers, forceKill)
 }

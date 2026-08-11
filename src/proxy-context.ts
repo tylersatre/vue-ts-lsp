@@ -2,10 +2,11 @@ import type { MessageConnection } from 'vscode-jsonrpc/node'
 import type { InitializeParams } from 'vscode-languageserver-protocol'
 import { DocumentStore } from './documents.js'
 import { DiagnosticsStore } from './diagnostics.js'
+import { createWorkspaceScanCache, type WorkspaceScanCache } from './proxy-workspace.js'
 import { RetryTracker } from './recovery.js'
 import type { WorkspaceConfig } from './config.js'
-import type { CrashRecoveryOptions, PathAliasConfig, RecentPositionContext } from './proxy-types.js'
-import { DOWNSTREAM_REQUEST_TIMEOUT_MS } from './proxy-types.js'
+import type { CrashRecoveryOptions, DiagnosticNudgeChannel, DiagnosticNudgeChannelState, PathAliasConfig, RecentPositionContext } from './proxy-types.js'
+import { DOWNSTREAM_REQUEST_TIMEOUT_MS, RECOVERY_STABILITY_WINDOW_MS } from './proxy-types.js'
 
 export interface ProxyContext {
     // Connections (mutable — reassigned during crash recovery)
@@ -15,6 +16,10 @@ export interface ProxyContext {
     currentKillVtsls: (() => void) | undefined
     currentKillVueLs: (() => void) | undefined
     crashOptions: CrashRecoveryOptions | undefined
+    // Only these published connection identities may contribute diagnostics.
+    // Recovery sets the relevant entry to null before its delay begins.
+    vtslsDiagnosticsConnection: MessageConnection | null
+    vueLsDiagnosticsConnection: MessageConnection | null
 
     // Initialization
     savedInitParams: InitializeParams | null
@@ -30,20 +35,23 @@ export interface ProxyContext {
     vueLsRetry: RetryTracker
     vtslsRecoveryPromise: Promise<void> | null
     vueLsRecoveryPromise: Promise<void> | null
+    // Wall-clock-independent bound on self-scheduled recovery retries: the sliding
+    // RetryTracker window can't stop a chain whose attempts each outlast it.
+    vtslsConsecutiveRecoveryFailures: number
+    vueLsConsecutiveRecoveryFailures: number
+    recoveryStabilityWindowMs: number
+    vtslsInitialized: boolean
+    intentionalRecoveryCloses: Set<MessageConnection>
 
     // Stores
     documentStore: DocumentStore
     diagnosticsStore: DiagnosticsStore
     pathAliasConfigCache: Map<string, PathAliasConfig[]>
+    workspaceScanCache: WorkspaceScanCache
 
     // Diagnostics nudging
     lastVtslsDiagnosticsAt: Map<string, number>
-    pendingVueDiagnosticNudges: Map<string, ReturnType<typeof setTimeout>>
-    queuedVueDiagnosticNudges: Set<string>
-    pendingScriptDiagnosticNudges: Map<string, ReturnType<typeof setTimeout>>
-    queuedScriptDiagnosticNudges: Set<string>
-    pendingScriptDependentDiagnosticNudges: Map<string, ReturnType<typeof setTimeout>>
-    queuedScriptDependentDiagnosticNudges: Set<string>
+    diagnosticNudges: Map<DiagnosticNudgeChannel, DiagnosticNudgeChannelState>
 
     // Background queue & tracking
     activeForegroundVtslsRequests: number
@@ -68,6 +76,8 @@ export function createProxyContext(
         currentKillVtsls: crashOptions?.killVtsls,
         currentKillVueLs: crashOptions?.killVueLs,
         crashOptions,
+        vtslsDiagnosticsConnection: vtsls,
+        vueLsDiagnosticsConnection: vueLs,
 
         savedInitParams: null,
         savedVueTypescriptPluginLocation: null,
@@ -81,18 +91,23 @@ export function createProxyContext(
         vueLsRetry: new RetryTracker(crashOptions?.maxRestarts, crashOptions?.windowMs),
         vtslsRecoveryPromise: null,
         vueLsRecoveryPromise: null,
+        vtslsConsecutiveRecoveryFailures: 0,
+        vueLsConsecutiveRecoveryFailures: 0,
+        recoveryStabilityWindowMs: crashOptions?.stabilityWindowMs ?? RECOVERY_STABILITY_WINDOW_MS,
+        vtslsInitialized: true,
+        intentionalRecoveryCloses: new Set(),
 
         documentStore: new DocumentStore(),
         diagnosticsStore: new DiagnosticsStore(),
         pathAliasConfigCache: new Map(),
+        workspaceScanCache: createWorkspaceScanCache(),
 
         lastVtslsDiagnosticsAt: new Map(),
-        pendingVueDiagnosticNudges: new Map(),
-        queuedVueDiagnosticNudges: new Set(),
-        pendingScriptDiagnosticNudges: new Map(),
-        queuedScriptDiagnosticNudges: new Set(),
-        pendingScriptDependentDiagnosticNudges: new Map(),
-        queuedScriptDependentDiagnosticNudges: new Set(),
+        diagnosticNudges: new Map([
+            ['vue', { pending: new Map(), queued: new Set() }],
+            ['script', { pending: new Map(), queued: new Set() }],
+            ['script-dependent', { pending: new Map(), queued: new Set() }]
+        ]),
 
         activeForegroundVtslsRequests: 0,
         vtslsBackgroundQueue: Promise.resolve(),

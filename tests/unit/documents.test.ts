@@ -144,6 +144,18 @@ describe('DocumentStore', () => {
         store.close('file:///a.ts')
         expect(store.getAll().size).toBe(1)
     })
+
+    it('shares live content across equivalent local file URI spellings while retaining the protocol URI', () => {
+        const store = new DocumentStore()
+        store.open('file://localhost/tmp/example.ts', 'typescript', 1, 'const value = 1;')
+
+        expect(store.get('file:///tmp/example.ts')?.content).toBe('const value = 1;')
+        store.change('file:///tmp/example.ts', 2, [{ text: 'const value = 2;' }])
+
+        expect(store.get('file://localhost/tmp/example.ts')?.version).toBe(2)
+        expect(store.getAll().get('file://localhost/tmp/example.ts')?.content).toBe('const value = 2;')
+        expect(store.getAll().has('file:///tmp/example.ts')).toBe(false)
+    })
 })
 
 describe('computeDocumentEnd', () => {

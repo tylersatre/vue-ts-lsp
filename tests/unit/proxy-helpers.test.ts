@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import ts from 'typescript'
 import { classifyDefinitionResult, normalizeDefinitionResult, preferDefinitionResult } from '@src/helpers/definitions.js'
 import { hoverResultLooksAny } from '@src/helpers/hover.js'
 import { extractRequestUri, extractIdentifierAtPosition } from '@src/helpers/identifiers.js'
@@ -10,7 +11,13 @@ import {
     findImportByLocalName
 } from '@src/helpers/imports.js'
 import { createDefinitionProbe, isInternalProbeUri } from '@src/helpers/probes.js'
-import { findReferenceTargetAtPosition, collectIdentifierReferencesInDocument, collectReferenceTargetsForChanges } from '@src/helpers/references.js'
+import {
+    findReferenceTargetAtPosition,
+    collectIdentifierReferencesInDocument,
+    collectReferenceTargetsForChanges,
+    getIdentifierIndex,
+    sweepIdentifierIndexCache
+} from '@src/helpers/references.js'
 import { findScriptSymbolByName, normalizeDocumentSymbolKinds } from '@src/helpers/symbols.js'
 import { parseTsserverRequest, summarizeBridgeResponseBody } from '@src/helpers/tsserver.js'
 import { findVueTemplateComponentAtPosition, normalizeVueTemplateExpressionPosition, isVueTemplatePosition } from '@src/helpers/vue-template.js'
@@ -396,6 +403,40 @@ describe('collectIdentifierReferencesInDocument', () => {
 
         expect(locations.some((location) => location.range.start.line === 2 && location.range.start.character === 33)).toBe(true)
         expect(locations.some((location) => location.range.start.line === 19 && location.range.start.character === 9)).toBe(true)
+    })
+
+    it('parses a document once for repeated identifier queries over the same text', () => {
+        // The dependent-diagnostics nudge queries up to 3 identifiers per file per
+        // edit; each query must not cost a fresh TS parse of the same text. Identity
+        // equality of the index proves the parse was reused.
+        const text = 'const alpha = 1;\nconst beta = alpha + 1;\n'
+        const first = getIdentifierIndex('file:///workspace/parse-once.ts', text)
+        expect(getIdentifierIndex('file:///workspace/parse-once.ts', text)).toBe(first)
+        expect(getIdentifierIndex('file:///workspace/parse-once.ts', text + '// changed\n')).not.toBe(first)
+
+        const locations = collectIdentifierReferencesInDocument('file:///workspace/parse-once.ts', text, 'beta')
+        expect(locations).toHaveLength(1)
+    })
+
+    it('drops idle index entries after the TTL so the cache cannot retain the workspace forever', () => {
+        vi.useFakeTimers({ now: Date.now() })
+        try {
+            const text = 'const gamma = 1;\n'
+            const first = getIdentifierIndex('file:///workspace/parse-ttl.ts', text)
+            vi.advanceTimersByTime(60_000)
+            sweepIdentifierIndexCache()
+            expect(getIdentifierIndex('file:///workspace/parse-ttl.ts', text)).not.toBe(first)
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
+    it('recomputes identifier references when the text changes', () => {
+        const uri = 'file:///workspace/parse-fresh.ts'
+        expect(collectIdentifierReferencesInDocument(uri, 'const alpha = 1;\n', 'alpha')).toHaveLength(1)
+        const updated = collectIdentifierReferencesInDocument(uri, 'const other = 1;\nconst alpha = other;\n', 'alpha')
+        expect(updated).toHaveLength(1)
+        expect(updated[0]?.range.start.line).toBe(1)
     })
 })
 

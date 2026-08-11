@@ -5,10 +5,83 @@ import ts from 'typescript'
 import type { InitializeParams } from 'vscode-languageserver-protocol'
 import type { ProxyContext } from './proxy-context.js'
 import type { PathAliasConfig } from './proxy-types.js'
+import { WORKSPACE_SCAN_CACHE_TTL_MS } from './proxy-types.js'
 import { uriToFilePath } from './proxy-utils.js'
 import { collectImportedModuleSpecifiers } from './helpers/imports.js'
+import { deleteIdentifierIndexEntry, sweepIdentifierIndexCache } from './helpers/references.js'
 import { loadWorkspaceConfig } from './config.js'
+import { normalizeUriIdentity } from './helpers/uri.js'
 import * as logger from './logger.js'
+
+/**
+ * The dependent-diagnostics nudge can trigger several full workspace walks (directory
+ * listing + per-file read + TS parse) per .ts edit — synchronous work that blocks the
+ * JSON-RPC event loop. These caches collapse the walks within a nudge cycle into one.
+ * Entries are invalidated per-URI on document lifecycle events and expire after a short
+ * TTL as a safety net for files changed outside the editor.
+ */
+export interface WorkspaceScanCache {
+    fileLists: Map<string, { files: string[]; cachedAt: number }>
+    fileTexts: Map<string, { text: string | null; cachedAt: number }>
+    importerUris: Map<string, { uris: string[]; cachedAt: number }>
+}
+
+export function createWorkspaceScanCache(): WorkspaceScanCache {
+    return {
+        fileLists: new Map(),
+        fileTexts: new Map(),
+        importerUris: new Map()
+    }
+}
+
+function readCacheEntry<T>(cache: Map<string, T & { cachedAt: number }>, key: string): T | undefined {
+    const entry = cache.get(key)
+    if (entry === undefined) {
+        return undefined
+    }
+    if (Date.now() - entry.cachedAt > WORKSPACE_SCAN_CACHE_TTL_MS) {
+        cache.delete(key)
+        return undefined
+    }
+    return entry
+}
+
+// Bounds resident memory, not correctness: one nudge cycle can read the whole
+// workspace, and nothing else evicts entries in an idle session.
+const WORKSPACE_TEXT_CACHE_MAX_ENTRIES = 4096
+
+function sweepExpiredEntries(cache: Map<string, { cachedAt: number }>): void {
+    const now = Date.now()
+    for (const [key, entry] of cache) {
+        if (now - entry.cachedAt > WORKSPACE_SCAN_CACHE_TTL_MS) {
+            cache.delete(key)
+        }
+    }
+}
+
+/**
+ * Runs on every document lifecycle event. A content edit anywhere can rewire the
+ * import graph, so importer results always reset; the file listing resets too because
+ * agents create files on disk without a didOpen (the next lifecycle event is the only
+ * signal that the directory contents may have changed). Expired text entries are swept
+ * here so idle sessions don't retain the whole workspace's source.
+ */
+export function invalidateWorkspaceCachesForUri(ctx: ProxyContext, uri: string): void {
+    const identity = normalizeUriIdentity(uri)
+    ctx.workspaceScanCache.fileTexts.delete(identity)
+    ctx.workspaceScanCache.importerUris.clear()
+    ctx.workspaceScanCache.fileLists.clear()
+    sweepExpiredEntries(ctx.workspaceScanCache.fileTexts)
+    deleteIdentifierIndexEntry(identity)
+    sweepIdentifierIndexCache()
+}
+
+export function clearWorkspaceScanCaches(ctx: ProxyContext): void {
+    ctx.workspaceScanCache.fileLists.clear()
+    ctx.workspaceScanCache.fileTexts.clear()
+    ctx.workspaceScanCache.importerUris.clear()
+    ctx.pathAliasConfigCache.clear()
+}
 
 export function getWorkspaceRootPathFromInitParams(params: InitializeParams | null): string | null {
     const rootUri = params?.rootUri ?? params?.workspaceFolders?.[0]?.uri ?? null
@@ -36,6 +109,8 @@ export function isIgnoredWorkspaceDirectory(ctx: ProxyContext, rootPath: string,
 export function applyWorkspaceConfigFromInitParams(ctx: ProxyContext, params: InitializeParams): void {
     const workspaceRootPath = getWorkspaceRootPathFromInitParams(params)
     ctx.workspaceConfig = { ignoreDirectories: [], logLevel: null }
+    // Config affects what the scans see (ignoreDirectories, path aliases) — start fresh.
+    clearWorkspaceScanCaches(ctx)
     if (workspaceRootPath === null) {
         logger.debug('proxy', 'workspace config skipped reason=no-workspace-root')
         return
@@ -172,6 +247,11 @@ export function resolveWorkspaceModuleSpecifier(ctx: ProxyContext, requestUri: s
 }
 
 export function listWorkspaceSourceFiles(ctx: ProxyContext, rootPath: string): string[] {
+    const cached = readCacheEntry(ctx.workspaceScanCache.fileLists, rootPath)
+    if (cached !== undefined) {
+        return cached.files
+    }
+
     const files: string[] = []
     const stack = [rootPath]
     const skippedDirs = new Set(['.git', '.cache', '.idea', '.next', '.nuxt', '.turbo', '.vite', 'coverage', 'dist', 'node_modules', 'tmp'])
@@ -204,6 +284,7 @@ export function listWorkspaceSourceFiles(ctx: ProxyContext, rootPath: string): s
         }
     }
 
+    ctx.workspaceScanCache.fileLists.set(rootPath, { files, cachedAt: Date.now() })
     return files
 }
 
@@ -213,16 +294,31 @@ export function getDocumentText(ctx: ProxyContext, uri: string): string | null {
         return doc.content
     }
 
+    const identity = normalizeUriIdentity(uri)
+    const cached = readCacheEntry(ctx.workspaceScanCache.fileTexts, identity)
+    if (cached !== undefined) {
+        return cached.text
+    }
+
     const filePath = uriToFilePath(uri)
     if (filePath === null) {
         return null
     }
 
+    let text: string | null
     try {
-        return fs.readFileSync(filePath, 'utf8')
+        text = fs.readFileSync(filePath, 'utf8')
     } catch {
-        return null
+        text = null
     }
+    if (ctx.workspaceScanCache.fileTexts.size >= WORKSPACE_TEXT_CACHE_MAX_ENTRIES) {
+        sweepExpiredEntries(ctx.workspaceScanCache.fileTexts)
+        if (ctx.workspaceScanCache.fileTexts.size >= WORKSPACE_TEXT_CACHE_MAX_ENTRIES) {
+            ctx.workspaceScanCache.fileTexts.clear()
+        }
+    }
+    ctx.workspaceScanCache.fileTexts.set(identity, { text, cachedAt: Date.now() })
+    return text
 }
 
 export function collectWorkspaceImporterUris(ctx: ProxyContext, requestUri: string): string[] {
@@ -232,11 +328,17 @@ export function collectWorkspaceImporterUris(ctx: ProxyContext, requestUri: stri
         return []
     }
 
+    const requestIdentity = normalizeUriIdentity(requestUri)
+    const cached = readCacheEntry(ctx.workspaceScanCache.importerUris, requestIdentity)
+    if (cached !== undefined) {
+        return cached.uris
+    }
+
     const importerUris: string[] = []
     const seen = new Set<string>()
     for (const filePath of listWorkspaceSourceFiles(ctx, workspaceRootPath)) {
         const uri = pathToFileURL(filePath).href
-        if (uri === requestUri) {
+        if (normalizeUriIdentity(uri) === requestIdentity) {
             continue
         }
 
@@ -259,5 +361,6 @@ export function collectWorkspaceImporterUris(ctx: ProxyContext, requestUri: stri
         importerUris.push(uri)
     }
 
+    ctx.workspaceScanCache.importerUris.set(requestIdentity, { uris: importerUris, cachedAt: Date.now() })
     return importerUris
 }

@@ -246,9 +246,10 @@ function findReturnedSymbolForOptionsStore(
         if (propertyIdentifier.text === 'state' && ts.isPropertyAssignment(property)) {
             const stateInitializer = unwrapExpression(property.initializer)
             if (ts.isArrowFunction(stateInitializer) || ts.isFunctionExpression(stateInitializer)) {
-                const stateObject = ts.isObjectLiteralExpression(stateInitializer.body)
-                    ? stateInitializer.body
-                    : findReturnedObjectLiteral(stateInitializer.body)
+                // The canonical Pinia idiom is `state: () => ({ ... })` — a concise
+                // arrow body wrapping the object literal in parentheses.
+                const conciseBody = ts.isBlock(stateInitializer.body) ? stateInitializer.body : unwrapExpression(stateInitializer.body)
+                const stateObject = ts.isObjectLiteralExpression(conciseBody) ? conciseBody : findReturnedObjectLiteral(stateInitializer.body)
                 if (stateObject !== null) {
                     const stateMatch = findObjectLiteralPropertyMatch(stateObject, propertyName, 13, sourceFile, contentStart, text, uri)
                     if (stateMatch !== null) {

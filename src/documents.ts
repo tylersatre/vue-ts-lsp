@@ -1,3 +1,5 @@
+import { normalizeUriIdentity } from './helpers/uri.js'
+
 export interface DocumentInfo {
     content: string
     version: number
@@ -13,33 +15,40 @@ interface ContentChange {
 }
 
 export class DocumentStore {
-    private readonly docs = new Map<string, DocumentInfo>()
+    private readonly docs = new Map<string, { uri: string; info: DocumentInfo }>()
 
     open(uri: string, languageId: string, version: number, content: string): void {
-        this.docs.set(uri, { content, version, languageId })
+        const identity = normalizeUriIdentity(uri)
+        const protocolUri = this.docs.get(identity)?.uri ?? uri
+        this.docs.set(identity, { uri: protocolUri, info: { content, version, languageId } })
     }
 
     change(uri: string, version: number, changes: ContentChange[]): void {
-        const document = this.docs.get(uri)
-        if (document === undefined) return
-        let content = document.content
+        const stored = this.docs.get(normalizeUriIdentity(uri))
+        if (stored === undefined) return
+        let content = stored.info.content
         for (const change of changes) {
             content = applyContentChange(content, change)
         }
-        document.content = content
-        document.version = version
+        stored.info.content = content
+        stored.info.version = version
     }
 
     close(uri: string): void {
-        this.docs.delete(uri)
+        this.docs.delete(normalizeUriIdentity(uri))
     }
 
     get(uri: string): DocumentInfo | undefined {
-        return this.docs.get(uri)
+        return this.docs.get(normalizeUriIdentity(uri))?.info
+    }
+
+    /** The URI spelling originally used to open this document downstream. */
+    getProtocolUri(uri: string): string | undefined {
+        return this.docs.get(normalizeUriIdentity(uri))?.uri
     }
 
     getAll(): ReadonlyMap<string, DocumentInfo> {
-        return this.docs
+        return new Map(Array.from(this.docs.values(), ({ uri, info }) => [uri, info]))
     }
 }
 

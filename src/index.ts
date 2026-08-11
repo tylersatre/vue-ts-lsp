@@ -42,8 +42,21 @@ export function hasExplicitLogLevelArg(argv: string[]): boolean {
     return false
 }
 
+/**
+ * Defense-in-depth: notification sends go through safeSendNotification, but any
+ * rejection that still escapes must not terminate the proxy (Node's default), which
+ * would orphan both child servers.
+ */
+export function installUnhandledRejectionGuard(): void {
+    process.on('unhandledRejection', (reason: unknown) => {
+        const msg = reason instanceof Error ? (reason.stack ?? reason.message) : String(reason)
+        process.stderr.write(`[vue-ts-lsp] Unhandled promise rejection: ${msg}\n`)
+    })
+}
+
 // Resolve symlinks so npm-linked binaries still satisfy the entrypoint guard.
 if (realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
+    installUnhandledRejectionGuard()
     const argv = process.argv.slice(2)
     const { logLevel } = parseArgs(argv)
     const cliLogLevel = hasExplicitLogLevelArg(argv) ? logLevel : null
@@ -62,8 +75,8 @@ if (realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url
     const { conn: vueLs, kill: killVueLs } = spawnServer(vueLsCfg.command, vueLsCfg.args)
     setupProxy(upstream, vtsls, vueLs, {
         cliLogLevel,
-        spawnVtsls: () => spawnServer(vtslsCfg.command, vtslsCfg.args),
-        spawnVueLs: () => spawnServer(vueLsCfg.command, vueLsCfg.args),
+        spawnVtsls: () => spawnServer(vtslsCfg.command, vtslsCfg.args, { exitOnProcessError: false }),
+        spawnVueLs: () => spawnServer(vueLsCfg.command, vueLsCfg.args, { exitOnProcessError: false }),
         killVtsls,
         killVueLs
     })
