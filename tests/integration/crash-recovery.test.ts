@@ -208,6 +208,52 @@ describe('crash recovery', () => {
         expect(newVueLs.onNotification).toHaveBeenCalledWith('tsserver/request', expect.any(Function))
     })
 
+    it('keeps vue_ls blocked through a failed vtsls attempt and bridges only through the published retry', async () => {
+        const upstream = createMockConnection()
+        const vtslsConn = createMockConnection()
+        const vueLsConn = createMockConnection()
+        const failedVtsls = createMockConnection()
+        const recoveredVtsls = createMockConnection()
+        const recoveredVueLs = createMockConnection()
+        failedVtsls.sendRequest.mockImplementation((method: string) =>
+            method === 'initialize' ? Promise.reject(new Error('first vtsls initialize failed')) : Promise.resolve({ body: 'wrong bridge' })
+        )
+        recoveredVtsls.sendRequest.mockImplementation((method: string) =>
+            method === 'workspace/executeCommand' ? Promise.resolve({ body: 'healthy bridge' }) : Promise.resolve({ capabilities: {} })
+        )
+        recoveredVueLs.sendRequest.mockImplementation(async (method: string) => {
+            if (method === 'initialize') {
+                recoveredVueLs.triggerNotification('tsserver/request', [91, 'geterr', { files: [] }])
+            }
+            return { capabilities: {} }
+        })
+        const spawnVtsls = vi
+            .fn()
+            .mockReturnValueOnce(failedVtsls as unknown as MessageConnection)
+            .mockReturnValueOnce(recoveredVtsls as unknown as MessageConnection)
+        const spawnVueLs = vi.fn().mockReturnValue(recoveredVueLs as unknown as MessageConnection)
+
+        setupProxy(upstream as unknown as MessageConnection, vtslsConn as unknown as MessageConnection, vueLsConn as unknown as MessageConnection, {
+            spawnVtsls,
+            spawnVueLs,
+            delayMs: 0
+        })
+        await upstream.triggerRequest('initialize', initParams)
+
+        vtslsConn.triggerClose()
+        vueLsConn.triggerClose()
+        await new Promise((resolve) => setTimeout(resolve, 20))
+
+        expect(spawnVtsls).toHaveBeenCalledTimes(2)
+        expect(spawnVueLs).toHaveBeenCalledOnce()
+        const recoveredVtslsInitOrder = recoveredVtsls.sendRequest.mock.invocationCallOrder[0]!
+        const recoveredVueInitOrder = recoveredVueLs.sendRequest.mock.invocationCallOrder[0]!
+        expect(recoveredVtslsInitOrder).toBeLessThan(recoveredVueInitOrder)
+        expect(failedVtsls.sendRequest).not.toHaveBeenCalledWith('workspace/executeCommand', expect.anything())
+        expect(recoveredVtsls.sendRequest).toHaveBeenCalledWith('workspace/executeCommand', expect.anything())
+        expect(recoveredVueLs.sendNotification).toHaveBeenCalledWith('tsserver/response', [91, 'healthy bridge'])
+    })
+
     it('replays only .vue documents to restarted vue_ls', async () => {
         const upstream = createMockConnection()
         const vtslsConn = createMockConnection()

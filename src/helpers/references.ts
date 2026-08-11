@@ -17,6 +17,7 @@ import { findNodeAtOffset, collectParseTargets, getExtension, isFunctionLikeInit
 import { isIdentifierChar, extractIdentifierAtPosition } from './identifiers.js'
 import { collectVueTemplateIdentifierRanges } from './vue-template.js'
 import { findVueTemplateComponentAtPosition } from './vue-template.js'
+import { normalizeUriIdentity } from './uri.js'
 
 function rangeForIdentifierAtPosition(text: string, position: Position): Range | null {
     const offset = lineCharToOffset(text, position)
@@ -224,7 +225,7 @@ const IDENTIFIER_INDEX_CACHE_TTL_MS = 5_000
 const identifierIndexCache = new Map<string, { text: string; index: Map<string, Range[]>; cachedAt: number }>()
 
 export function deleteIdentifierIndexEntry(uri: string): void {
-    identifierIndexCache.delete(uri)
+    identifierIndexCache.delete(normalizeUriIdentity(uri))
 }
 
 export function sweepIdentifierIndexCache(): void {
@@ -237,7 +238,8 @@ export function sweepIdentifierIndexCache(): void {
 }
 
 export function getIdentifierIndex(uri: string, text: string): Map<string, Range[]> {
-    const cached = identifierIndexCache.get(uri)
+    const identity = normalizeUriIdentity(uri)
+    const cached = identifierIndexCache.get(identity)
     if (cached !== undefined && cached.text === text) {
         cached.cachedAt = Date.now()
         return cached.index
@@ -270,7 +272,7 @@ export function getIdentifierIndex(uri: string, text: string): Map<string, Range
             identifierIndexCache.clear()
         }
     }
-    identifierIndexCache.set(uri, { text, index, cachedAt: Date.now() })
+    identifierIndexCache.set(identity, { text, index, cachedAt: Date.now() })
     return index
 }
 

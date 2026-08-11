@@ -1,7 +1,8 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { MessageConnection } from 'vscode-jsonrpc/node'
 import { createProxyContext, type ProxyContext } from '@src/proxy-context.js'
 import { recoverVtsls, recoverVueLs } from '@src/proxy-recovery.js'
+import { setupVtslsHandlers, setupVueLsHandlers } from '@src/proxy-handlers.js'
 
 type MockConnection = {
     sendRequest: ReturnType<typeof vi.fn>
@@ -11,17 +12,30 @@ type MockConnection = {
     onClose: ReturnType<typeof vi.fn>
     listen: ReturnType<typeof vi.fn>
     dispose: ReturnType<typeof vi.fn>
+    triggerClose: () => void
+    triggerNotification: (method: string, params?: unknown) => void
 }
 
 function createMockConnection(): MockConnection {
+    const closeHandlers: Array<() => void> = []
+    const notificationHandlers = new Map<string, (params: unknown) => void>()
     return {
         sendRequest: vi.fn().mockResolvedValue({ capabilities: {} }),
         sendNotification: vi.fn(),
         onRequest: vi.fn(),
-        onNotification: vi.fn(),
-        onClose: vi.fn(),
+        onNotification: vi.fn((method: string, handler: (params: unknown) => void) => {
+            notificationHandlers.set(method, handler)
+        }),
+        onClose: vi.fn((handler: () => void) => {
+            closeHandlers.push(handler)
+            return { dispose: () => {} }
+        }),
         listen: vi.fn(),
-        dispose: vi.fn()
+        dispose: vi.fn(),
+        triggerClose: () => {
+            for (const handler of closeHandlers) handler()
+        },
+        triggerNotification: (method: string, params?: unknown) => notificationHandlers.get(method)?.(params)
     }
 }
 
@@ -56,6 +70,8 @@ function createVtslsRecoveryContext(options?: {
     stabilityWindowMs?: number
     recoveredConn?: MockConnection
     killVtsls?: () => void
+    delayMs?: number
+    requestTimeoutMs?: number
 }): {
     ctx: ProxyContext
     oldVtsls: MockConnection
@@ -77,16 +93,21 @@ function createVtslsRecoveryContext(options?: {
         {
             spawnVtsls: () => spawnVtsls() as { conn: MessageConnection; kill: () => void },
             killVtsls: options?.killVtsls,
-            delayMs: 0,
+            delayMs: options?.delayMs ?? 0,
             maxRestarts: options?.maxRestarts,
             windowMs: options?.windowMs,
-            stabilityWindowMs: options?.stabilityWindowMs
+            stabilityWindowMs: options?.stabilityWindowMs,
+            requestTimeoutMs: options?.requestTimeoutMs
         }
     )
     ctx.savedInitParams = SAVED_INIT_PARAMS
     ctx.savedVueTypescriptPluginLocation = '/mock/plugin'
     return { ctx, oldVtsls, recoveredConn, spawnVtsls, spawnedKill }
 }
+
+afterEach(() => {
+    vi.useRealTimers()
+})
 
 function didOpenCallsFor(conn: MockConnection, uri: string): unknown[][] {
     return conn.sendNotification.mock.calls.filter(
@@ -178,7 +199,7 @@ describe('recoverVtsls', () => {
     it('shows a message and does not spawn when the retry cap is reached', async () => {
         const { ctx, oldVtsls, spawnVtsls } = createVtslsRecoveryContext({ maxRestarts: 0 })
 
-        await recoverVtsls(ctx, 'connection closed', () => {})
+        await expect(recoverVtsls(ctx, 'connection closed', () => {})).rejects.toThrow('retry cap reached')
 
         expect(spawnVtsls).not.toHaveBeenCalled()
         expect(ctx.currentVtsls).toBe(oldVtsls)
@@ -199,6 +220,69 @@ describe('recoverVtsls', () => {
         expect(recoveredConn.dispose).toHaveBeenCalled()
     })
 
+    it('rejects and disposes a candidate that closes after accepting initialize but before replying', async () => {
+        const { ctx, oldVtsls, recoveredConn, spawnedKill } = createVtslsRecoveryContext({ maxRestarts: 1 })
+        recoveredConn.sendRequest.mockReturnValue(new Promise(() => {}))
+
+        const recovery = recoverVtsls(ctx, 'connection closed', () => {})
+        await tick()
+        recoveredConn.triggerClose()
+
+        await expect(recovery).rejects.toThrow('closed during initialization')
+        expect(ctx.currentVtsls).toBe(oldVtsls)
+        expect(spawnedKill).toHaveBeenCalledOnce()
+        expect(recoveredConn.dispose).toHaveBeenCalledOnce()
+    })
+
+    it('times out and disposes a candidate that stays open without replying to initialize', async () => {
+        vi.useFakeTimers()
+        const { ctx, oldVtsls, recoveredConn, spawnedKill } = createVtslsRecoveryContext({ maxRestarts: 1, requestTimeoutMs: 25 })
+        recoveredConn.sendRequest.mockReturnValue(new Promise(() => {}))
+
+        const recovery = recoverVtsls(ctx, 'connection closed', () => {})
+        const rejection = expect(recovery).rejects.toThrow('initialize timed out after 25ms')
+        await vi.runAllTimersAsync()
+        await rejection
+
+        expect(ctx.currentVtsls).toBe(oldVtsls)
+        expect(spawnedKill).toHaveBeenCalledOnce()
+        expect(recoveredConn.dispose).toHaveBeenCalledOnce()
+    })
+
+    it('does not publish a candidate that replies and then closes before publication', async () => {
+        const { ctx, oldVtsls, recoveredConn } = createVtslsRecoveryContext({ maxRestarts: 1 })
+        recoveredConn.sendNotification.mockImplementation((method: string) => {
+            if (method === 'initialized') recoveredConn.triggerClose()
+        })
+
+        await expect(recoverVtsls(ctx, 'connection closed', () => {})).rejects.toThrow('closed before publication')
+
+        expect(ctx.currentVtsls).toBe(oldVtsls)
+    })
+
+    it('shares one successful recovery and publishes the initialized candidate exactly once', async () => {
+        const { ctx, oldVtsls, recoveredConn, spawnVtsls } = createVtslsRecoveryContext()
+        let current = oldVtsls as unknown as MessageConnection
+        let publications = 0
+        Object.defineProperty(ctx, 'currentVtsls', {
+            configurable: true,
+            get: () => current,
+            set: (conn: MessageConnection) => {
+                publications += 1
+                current = conn
+            }
+        })
+
+        const first = recoverVtsls(ctx, 'connection closed', () => {})
+        const second = recoverVtsls(ctx, 'duplicate close', () => {})
+        await Promise.all([first, second])
+
+        expect(first).toBe(second)
+        expect(spawnVtsls).toHaveBeenCalledOnce()
+        expect(ctx.currentVtsls).toBe(recoveredConn)
+        expect(publications).toBe(1)
+    })
+
     it('gives up after consecutive failed attempts even when the retry window has slid', async () => {
         // RetryTracker's 30s sliding window cannot bound a chain whose attempts each
         // take longer than windowMs/maxRestarts — timestamps expire before the cap
@@ -208,7 +292,6 @@ describe('recoverVtsls', () => {
         recoveredConn.sendRequest.mockRejectedValue(new Error('initialize failed'))
 
         await expect(recoverVtsls(ctx, 'connection closed', () => {})).rejects.toThrow('initialize failed')
-        await new Promise((resolve) => setTimeout(resolve, 50))
 
         expect(spawnVtsls).toHaveBeenCalledTimes(2)
         expect((ctx.upstream as unknown as MockConnection).sendNotification).toHaveBeenCalledWith(
@@ -223,10 +306,10 @@ describe('recoverVtsls', () => {
         recoveredConn.sendRequest.mockRejectedValue(new Error('initialize failed'))
         spawnVtsls.mockReturnValueOnce({ conn: recoveredConn, kill: vi.fn() }).mockReturnValue({ conn: healthyConn, kill: vi.fn() })
 
-        await expect(recoverVtsls(ctx, 'connection closed', () => {})).rejects.toThrow('initialize failed')
-        await new Promise((resolve) => setTimeout(resolve, 20))
+        await recoverVtsls(ctx, 'connection closed', () => {})
         expect(ctx.currentVtsls).toBe(healthyConn)
 
+        await new Promise((resolve) => setTimeout(resolve, 20))
         const nextConn = createMockConnection()
         spawnVtsls.mockReturnValue({ conn: nextConn, kill: vi.fn() })
         await recoverVtsls(ctx, 'connection closed', () => {})
@@ -274,8 +357,7 @@ describe('recoverVtsls', () => {
         recoveredConn.sendRequest.mockRejectedValue(new Error('initialize failed'))
         spawnVtsls.mockReturnValueOnce({ conn: recoveredConn, kill: vi.fn() }).mockReturnValueOnce({ conn: secondConn, kill: vi.fn() })
 
-        await expect(recoverVtsls(ctx, 'connection closed', () => {})).rejects.toThrow('initialize failed')
-        await new Promise((resolve) => setTimeout(resolve, 20))
+        await recoverVtsls(ctx, 'connection closed', () => {})
 
         expect(spawnVtsls).toHaveBeenCalledTimes(2)
         expect(ctx.currentVtsls).toBe(secondConn)
@@ -296,8 +378,7 @@ describe('recoverVtsls', () => {
         expect(ctx.currentVtsls).toBe(conns[0])
 
         for (let i = 0; i < 2; i++) {
-            const onCloseHandler = conns[i]!.onClose.mock.calls[0]![0] as () => void
-            onCloseHandler()
+            conns[i]!.triggerClose()
             await new Promise((resolve) => setTimeout(resolve, 20))
         }
 
@@ -319,8 +400,7 @@ describe('recoverVtsls', () => {
 
         // The replacement stays healthy past the stability window before crashing.
         await new Promise((resolve) => setTimeout(resolve, 40))
-        const onCloseHandler = recoveredConn.onClose.mock.calls[0]![0] as () => void
-        onCloseHandler()
+        recoveredConn.triggerClose()
         await new Promise((resolve) => setTimeout(resolve, 20))
 
         expect(ctx.currentVtsls).toBe(secondConn)
@@ -342,6 +422,73 @@ describe('recoverVtsls', () => {
             'window/showMessage',
             expect.objectContaining({ message: expect.stringContaining('crashed too many times') })
         )
+    })
+
+    it('keeps an intentionally killed connection marked until its delayed close is observed', async () => {
+        const { ctx, recoveredConn, spawnVtsls } = createVtslsRecoveryContext({ maxRestarts: 2, windowMs: 1 })
+        const failedReplacement = createMockConnection()
+        const healthyReplacement = createMockConnection()
+        const healthyInit = createDeferred<unknown>()
+        failedReplacement.sendRequest.mockRejectedValue(new Error('replacement initialize failed'))
+        healthyReplacement.sendRequest.mockReturnValue(healthyInit.promise)
+
+        const killPublished = vi.fn()
+        spawnVtsls.mockReset()
+        spawnVtsls
+            .mockReturnValueOnce({ conn: recoveredConn, kill: killPublished })
+            .mockReturnValueOnce({ conn: failedReplacement, kill: vi.fn() })
+            .mockReturnValueOnce({ conn: healthyReplacement, kill: vi.fn() })
+
+        await recoverVtsls(ctx, 'connection closed', () => {})
+        await new Promise((resolve) => setTimeout(resolve, 5))
+        const forcedRecovery = recoverVtsls(ctx, 'request timeout: textDocument/definition', () => {}, true)
+        await tick()
+        await tick()
+
+        expect(killPublished).toHaveBeenCalledOnce()
+        expect(spawnVtsls).toHaveBeenCalledTimes(3)
+        recoveredConn.triggerClose()
+        healthyInit.resolve({ capabilities: {} })
+        await forcedRecovery
+        await tick()
+
+        expect(ctx.currentVtsls).toBe(healthyReplacement)
+        expect(ctx.vtslsConsecutiveRecoveryFailures).toBe(1)
+        expect(spawnVtsls).toHaveBeenCalledTimes(3)
+    })
+
+    it('ignores and does not retain diagnostics from the superseded connection during the force-kill delay', async () => {
+        vi.useFakeTimers()
+        const { ctx, oldVtsls } = createVtslsRecoveryContext({ delayMs: 50 })
+        const vueLs = ctx.currentVueLs as unknown as MockConnection
+        setupVtslsHandlers(ctx, oldVtsls as unknown as MessageConnection)
+        setupVueLsHandlers(ctx, vueLs as unknown as MessageConnection)
+        ctx.documentStore.open('file:///workspace/App.vue', 'vue', 1, '<template/>')
+
+        oldVtsls.triggerNotification('textDocument/publishDiagnostics', {
+            uri: 'file:///workspace/App.vue',
+            diagnostics: [{ message: 'before recovery', range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } } }]
+        })
+        ;(ctx.upstream as unknown as MockConnection).sendNotification.mockClear()
+
+        const recovery = recoverVtsls(ctx, 'request timeout: textDocument/definition', () => {}, true)
+        oldVtsls.triggerNotification('textDocument/publishDiagnostics', {
+            uri: 'file:///workspace/App.vue',
+            diagnostics: [{ message: 'late stale result', range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } } }]
+        })
+        expect((ctx.upstream as unknown as MockConnection).sendNotification).not.toHaveBeenCalledWith('textDocument/publishDiagnostics', expect.anything())
+
+        vueLs.triggerNotification('textDocument/publishDiagnostics', {
+            uri: 'file:///workspace/App.vue',
+            diagnostics: [{ message: 'current Vue result', range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } } }]
+        })
+        expect((ctx.upstream as unknown as MockConnection).sendNotification).toHaveBeenCalledWith(
+            'textDocument/publishDiagnostics',
+            expect.objectContaining({ diagnostics: [expect.objectContaining({ message: 'current Vue result' })] })
+        )
+
+        await vi.runAllTimersAsync()
+        await recovery
     })
 })
 
@@ -415,15 +562,15 @@ describe('recoverVueLs', () => {
         expect(ctx.currentVueLs).toBe(recoveredConn)
     })
 
-    it('still recovers vue_ls when the awaited vtsls recovery fails', async () => {
+    it('fails closed without spawning vue_ls when the bounded vtsls recovery chain gives up', async () => {
         const { ctx, recoveredConn } = createVueLsRecoveryContext()
         ctx.vtslsRecoveryPromise = Promise.reject(new Error('vtsls init boom'))
         ctx.vtslsRecoveryPromise.catch(() => {})
 
-        await recoverVueLs(ctx, 'connection closed', () => {})
+        await expect(recoverVueLs(ctx, 'connection closed', () => {})).rejects.toThrow('vtsls init boom')
 
-        expect(recoveredConn.sendRequest).toHaveBeenCalledWith('initialize', expect.anything())
-        expect(ctx.currentVueLs).toBe(recoveredConn)
+        expect(recoveredConn.sendRequest).not.toHaveBeenCalled()
+        expect(ctx.currentVueLs).not.toBe(recoveredConn)
     })
 
     it('does not publish the recovered vue_ls connection until initialize and replay complete', async () => {

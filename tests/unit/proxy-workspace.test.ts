@@ -171,6 +171,24 @@ describe('workspace scan caching', () => {
 
             expect(collectWorkspaceImporterUris(ctx, targetUri)).toEqual([])
         })
+
+        it('rebuilds against an unsaved edit opened through an equivalent local file URI', () => {
+            setupDocumentLifecycleHandlers(ctx)
+            const targetUri = pathToFileURL(path.join(workDir, 'target.ts')).href
+            const importerUri = pathToFileURL(path.join(workDir, 'importer.ts')).href
+            const aliasUri = importerUri.replace('file:///', 'file://localhost/')
+
+            expect(collectWorkspaceImporterUris(ctx, targetUri)).toEqual([importerUri])
+            expect(getDocumentText(ctx, importerUri)).toContain("from './target'")
+
+            upstream.triggerNotification('textDocument/didChange', {
+                textDocument: { uri: aliasUri, version: 2 },
+                contentChanges: [{ text: 'export const use = 1;\n' }]
+            })
+
+            expect(getDocumentText(ctx, importerUri)).toBe('export const use = 1;\n')
+            expect(collectWorkspaceImporterUris(ctx, targetUri)).toEqual([])
+        })
     })
 
     describe('document lifecycle invalidation wiring', () => {

@@ -13,6 +13,7 @@ const LEVEL_RANK: Record<LogLevel, number> = {
 
 let currentLevel: LogLevel = 'error'
 let fileStream: fs.WriteStream | null = null
+let fileClosePromise: Promise<void> | null = null
 
 export function setLogLevel(level: LogLevel): void {
     currentLevel = level
@@ -33,14 +34,21 @@ export function initFileLogging(filePath?: string): void {
 
 /** Resolves once buffered entries have reached disk — await before process.exit. */
 export function closeFileLogging(): Promise<void> {
+    if (fileClosePromise !== null) {
+        return fileClosePromise
+    }
     if (fileStream === null) {
         return Promise.resolve()
     }
     const stream = fileStream
     fileStream = null
-    return new Promise((resolve) => {
+    const closing = new Promise<void>((resolve) => {
         stream.end(() => resolve())
+    }).finally(() => {
+        fileClosePromise = null
     })
+    fileClosePromise = closing
+    return closing
 }
 
 function shouldLog(level: LogLevel): boolean {

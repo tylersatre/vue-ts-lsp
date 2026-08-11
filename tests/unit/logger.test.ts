@@ -253,6 +253,17 @@ describe('logger', () => {
             expect(content).toContain('flush me before exit')
         })
 
+        it('returns the same in-progress close promise to concurrent callers', async () => {
+            initFileLogging(tmpLogFile)
+            error('proxy', 'single flight')
+
+            const first = closeFileLogging()
+            const second = closeFileLogging()
+
+            expect(second).toBe(first)
+            await first
+        })
+
         it('does not write to stdout with file logging active', () => {
             initFileLogging(tmpLogFile)
             setLogLevel('debug')

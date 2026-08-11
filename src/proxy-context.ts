@@ -16,6 +16,10 @@ export interface ProxyContext {
     currentKillVtsls: (() => void) | undefined
     currentKillVueLs: (() => void) | undefined
     crashOptions: CrashRecoveryOptions | undefined
+    // Only these published connection identities may contribute diagnostics.
+    // Recovery sets the relevant entry to null before its delay begins.
+    vtslsDiagnosticsConnection: MessageConnection | null
+    vueLsDiagnosticsConnection: MessageConnection | null
 
     // Initialization
     savedInitParams: InitializeParams | null
@@ -36,6 +40,8 @@ export interface ProxyContext {
     vtslsConsecutiveRecoveryFailures: number
     vueLsConsecutiveRecoveryFailures: number
     recoveryStabilityWindowMs: number
+    vtslsInitialized: boolean
+    intentionalRecoveryCloses: Set<MessageConnection>
 
     // Stores
     documentStore: DocumentStore
@@ -70,6 +76,8 @@ export function createProxyContext(
         currentKillVtsls: crashOptions?.killVtsls,
         currentKillVueLs: crashOptions?.killVueLs,
         crashOptions,
+        vtslsDiagnosticsConnection: vtsls,
+        vueLsDiagnosticsConnection: vueLs,
 
         savedInitParams: null,
         savedVueTypescriptPluginLocation: null,
@@ -86,6 +94,8 @@ export function createProxyContext(
         vtslsConsecutiveRecoveryFailures: 0,
         vueLsConsecutiveRecoveryFailures: 0,
         recoveryStabilityWindowMs: crashOptions?.stabilityWindowMs ?? RECOVERY_STABILITY_WINDOW_MS,
+        vtslsInitialized: true,
+        intentionalRecoveryCloses: new Set(),
 
         documentStore: new DocumentStore(),
         diagnosticsStore: new DiagnosticsStore(),

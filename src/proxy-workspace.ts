@@ -10,6 +10,7 @@ import { uriToFilePath } from './proxy-utils.js'
 import { collectImportedModuleSpecifiers } from './helpers/imports.js'
 import { deleteIdentifierIndexEntry, sweepIdentifierIndexCache } from './helpers/references.js'
 import { loadWorkspaceConfig } from './config.js'
+import { normalizeUriIdentity } from './helpers/uri.js'
 import * as logger from './logger.js'
 
 /**
@@ -66,11 +67,12 @@ function sweepExpiredEntries(cache: Map<string, { cachedAt: number }>): void {
  * here so idle sessions don't retain the whole workspace's source.
  */
 export function invalidateWorkspaceCachesForUri(ctx: ProxyContext, uri: string): void {
-    ctx.workspaceScanCache.fileTexts.delete(uri)
+    const identity = normalizeUriIdentity(uri)
+    ctx.workspaceScanCache.fileTexts.delete(identity)
     ctx.workspaceScanCache.importerUris.clear()
     ctx.workspaceScanCache.fileLists.clear()
     sweepExpiredEntries(ctx.workspaceScanCache.fileTexts)
-    deleteIdentifierIndexEntry(uri)
+    deleteIdentifierIndexEntry(identity)
     sweepIdentifierIndexCache()
 }
 
@@ -292,7 +294,8 @@ export function getDocumentText(ctx: ProxyContext, uri: string): string | null {
         return doc.content
     }
 
-    const cached = readCacheEntry(ctx.workspaceScanCache.fileTexts, uri)
+    const identity = normalizeUriIdentity(uri)
+    const cached = readCacheEntry(ctx.workspaceScanCache.fileTexts, identity)
     if (cached !== undefined) {
         return cached.text
     }
@@ -314,7 +317,7 @@ export function getDocumentText(ctx: ProxyContext, uri: string): string | null {
             ctx.workspaceScanCache.fileTexts.clear()
         }
     }
-    ctx.workspaceScanCache.fileTexts.set(uri, { text, cachedAt: Date.now() })
+    ctx.workspaceScanCache.fileTexts.set(identity, { text, cachedAt: Date.now() })
     return text
 }
 
@@ -325,7 +328,8 @@ export function collectWorkspaceImporterUris(ctx: ProxyContext, requestUri: stri
         return []
     }
 
-    const cached = readCacheEntry(ctx.workspaceScanCache.importerUris, requestUri)
+    const requestIdentity = normalizeUriIdentity(requestUri)
+    const cached = readCacheEntry(ctx.workspaceScanCache.importerUris, requestIdentity)
     if (cached !== undefined) {
         return cached.uris
     }
@@ -334,7 +338,7 @@ export function collectWorkspaceImporterUris(ctx: ProxyContext, requestUri: stri
     const seen = new Set<string>()
     for (const filePath of listWorkspaceSourceFiles(ctx, workspaceRootPath)) {
         const uri = pathToFileURL(filePath).href
-        if (uri === requestUri) {
+        if (normalizeUriIdentity(uri) === requestIdentity) {
             continue
         }
 
@@ -357,6 +361,6 @@ export function collectWorkspaceImporterUris(ctx: ProxyContext, requestUri: stri
         importerUris.push(uri)
     }
 
-    ctx.workspaceScanCache.importerUris.set(requestUri, { uris: importerUris, cachedAt: Date.now() })
+    ctx.workspaceScanCache.importerUris.set(requestIdentity, { uris: importerUris, cachedAt: Date.now() })
     return importerUris
 }

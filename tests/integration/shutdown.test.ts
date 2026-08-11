@@ -128,6 +128,34 @@ describe('graceful shutdown', () => {
         exitSpy.mockRestore()
     })
 
+    it('shares the original pending log flush across exit and a later upstream close', async () => {
+        const upstream = createMockConnection()
+        const vtslsConn = createMockConnection()
+        const vueLsConn = createMockConnection()
+        const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+        const flush = createDeferred<void>()
+        vi.mocked(logger.closeFileLogging).mockReset().mockReturnValueOnce(flush.promise).mockResolvedValue(undefined)
+
+        setupProxy(upstream as unknown as MessageConnection, vtslsConn as unknown as MessageConnection, vueLsConn as unknown as MessageConnection)
+        await upstream.triggerRequest('initialize', initParams)
+        await upstream.triggerRequest('shutdown')
+
+        upstream.triggerNotification('exit')
+        upstream.triggerClose()
+        await Promise.resolve()
+
+        expect(logger.closeFileLogging).toHaveBeenCalledOnce()
+        expect(exitSpy).not.toHaveBeenCalled()
+
+        flush.resolve()
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        expect(exitSpy).toHaveBeenCalledOnce()
+        expect(exitSpy).toHaveBeenCalledWith(0)
+
+        vi.mocked(logger.closeFileLogging).mockResolvedValue(undefined)
+        exitSpy.mockRestore()
+    })
+
     it('force-kills children when the upstream closes during an in-flight shutdown', async () => {
         const upstream = createMockConnection()
         const vtslsConn = createMockConnection()

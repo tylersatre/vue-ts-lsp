@@ -20,6 +20,7 @@ interface RecoverySpec {
     getCurrentConn: (ctx: ProxyContext) => MessageConnection
     killCurrent: (ctx: ProxyContext) => void
     publish: (ctx: ProxyContext, conn: MessageConnection, kill: (() => void) | undefined) => void
+    setDiagnosticsConnection: (ctx: ProxyContext, conn: MessageConnection | null) => void
     buildInitParams: (ctx: ProxyContext) => unknown | null
     buildSettings: (ctx: ProxyContext) => unknown
     replayFilter: (uri: string) => boolean
@@ -46,6 +47,11 @@ const VTSLS_SPEC: RecoverySpec = {
     publish: (ctx, conn, kill) => {
         ctx.currentVtsls = conn
         ctx.currentKillVtsls = kill ?? ctx.currentKillVtsls
+        ctx.vtslsDiagnosticsConnection = conn
+        ctx.vtslsInitialized = true
+    },
+    setDiagnosticsConnection: (ctx, conn) => {
+        ctx.vtslsDiagnosticsConnection = conn
     },
     buildInitParams: (ctx) =>
         ctx.savedInitParams !== null && ctx.savedVueTypescriptPluginLocation !== null
@@ -74,16 +80,24 @@ const VUE_LS_SPEC: RecoverySpec = {
     publish: (ctx, conn, kill) => {
         ctx.currentVueLs = conn
         ctx.currentKillVueLs = kill ?? ctx.currentKillVueLs
+        ctx.vueLsDiagnosticsConnection = conn
+    },
+    setDiagnosticsConnection: (ctx, conn) => {
+        ctx.vueLsDiagnosticsConnection = conn
     },
     buildInitParams: (ctx) => (ctx.savedInitParams !== null ? buildVueLsInitParams(ctx.savedInitParams) : null),
     buildSettings: () => buildVueLsSettings(),
     replayFilter: isVueUri,
-    // vue_ls sends tsserver/request during initialize, so any active vtsls recovery
-    // must finish before vue_ls comes back up. A failed vtsls recovery must not abort
-    // this one — vue_ls can still be useful and its retry budget is already spent.
+    // vue_ls sends tsserver/request during initialize. The vtsls recovery promise now
+    // spans its complete bounded retry chain, so success means the published bridge is
+    // ready and rejection means Vue must fail closed rather than initialize degraded.
     beforeSpawn: async (ctx) => {
-        if (ctx.vtslsRecoveryPromise !== null) {
-            await ctx.vtslsRecoveryPromise.catch(() => {})
+        const activeVtslsRecovery = ctx.vtslsRecoveryPromise
+        if (activeVtslsRecovery !== null) {
+            await activeVtslsRecovery
+        }
+        if (!ctx.vtslsInitialized) {
+            throw new Error('vue_ls recovery blocked because vtsls is not initialized')
         }
     }
 }
@@ -91,6 +105,10 @@ const VUE_LS_SPEC: RecoverySpec = {
 function setupCrashRecoveryFor(spec: RecoverySpec, ctx: ProxyContext, conn: MessageConnection, recoverFn: RecoverFn): void {
     if (!spec.canSpawn(ctx)) return
     conn.onClose(() => {
+        if (ctx.intentionalRecoveryCloses.delete(conn)) {
+            logger.debug('proxy', `${spec.server} ignored intentional recovery close`)
+            return
+        }
         if (conn !== spec.getCurrentConn(ctx)) {
             return
         }
@@ -100,60 +118,126 @@ function setupCrashRecoveryFor(spec: RecoverySpec, ctx: ProxyContext, conn: Mess
     })
 }
 
-function recoverServer(
+function notifyRetryCap(spec: RecoverySpec, ctx: ProxyContext): void {
+    const retry = spec.getRetry(ctx)
+    logger.error(
+        'proxy',
+        `${spec.server}: retry cap reached (max ${retry.maxRestarts} in ${retry.windowMs / 1000}s, consecutive=${spec.getConsecutiveFailures(ctx)})`
+    )
+    safeSendNotification(ctx.upstream, 'window/showMessage', {
+        type: 1,
+        message: spec.crashMessage
+    })
+}
+
+function disposeFailedCandidate(spec: RecoverySpec, spawned: ReturnType<typeof normalizeSpawnedConnection>): void {
+    try {
+        spawned.kill?.()
+    } catch (err: unknown) {
+        logger.warn('proxy', `${spec.server} failed candidate kill error: ${String(err)}`)
+    }
+    try {
+        spawned.conn.dispose()
+    } catch (err: unknown) {
+        logger.warn('proxy', `${spec.server} failed candidate dispose error: ${String(err)}`)
+    }
+}
+
+function observeCandidateClose(conn: MessageConnection): { closed: Promise<void>; isClosed: () => boolean } {
+    let didClose = false
+    let resolveClose!: () => void
+    const closed = new Promise<void>((resolve) => {
+        resolveClose = resolve
+    })
+    conn.onClose(() => {
+        if (!didClose) {
+            didClose = true
+            resolveClose()
+        }
+    })
+    return { closed, isClosed: () => didClose }
+}
+
+async function initializeCandidate(spec: RecoverySpec, ctx: ProxyContext, conn: MessageConnection, initParams: unknown, closed: Promise<void>): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | null = null
+    try {
+        await Promise.race([
+            conn.sendRequest('initialize', initParams),
+            closed.then(() => {
+                throw new Error(`${spec.server} replacement connection closed during initialization`)
+            }),
+            new Promise<never>((_, reject) => {
+                timer = setTimeout(() => {
+                    reject(new Error(`${spec.server} replacement initialize timed out after ${ctx.requestTimeoutMs}ms`))
+                }, ctx.requestTimeoutMs)
+            })
+        ])
+    } finally {
+        if (timer !== null) {
+            clearTimeout(timer)
+        }
+    }
+}
+
+function candidateClosedError(spec: RecoverySpec): Error {
+    return new Error(`${spec.server} replacement connection closed before publication`)
+}
+
+async function runRecoveryChain(
     spec: RecoverySpec,
     ctx: ProxyContext,
-    reason: string,
+    initialReason: string,
     setupHandlers: (conn: MessageConnection) => void,
     forceKill: boolean
 ): Promise<void> {
-    const active = spec.getRecoveryPromise(ctx)
-    if (active !== null) {
-        return active
+    const retry = spec.getRetry(ctx)
+    let reason = initialReason
+    let lastError: unknown = null
+    let shouldForceKill = forceKill
+
+    // Supersede the old diagnostic generation before the recovery delay. This keeps
+    // a timed-out child from repopulating the store while it is awaiting SIGTERM.
+    spec.setDiagnosticsConnection(ctx, null)
+    ctx.diagnosticsStore.clearServer(spec.server)
+    if (spec.server === 'vtsls') {
+        ctx.vtslsInitialized = false
     }
 
-    const recovery = (async () => {
+    while (true) {
         logger.info('proxy', `${spec.server} recovery starting reason=${reason}`)
 
-        const retry = spec.getRetry(ctx)
         // Two independent bounds: the sliding window catches rapid crash bursts, and
-        // the consecutive counter catches slow cycles (crash-shortly-after-recovery
-        // and failed initializes) that the window's timestamp eviction cannot see.
+        // the consecutive counter catches slow failed-initialize/short-lived cycles.
         if (spec.getConsecutiveFailures(ctx) >= retry.maxRestarts || !retry.canRestart()) {
-            logger.error(
-                'proxy',
-                `${spec.server}: retry cap reached (max ${retry.maxRestarts} in ${retry.windowMs / 1000}s, consecutive=${spec.getConsecutiveFailures(ctx)})`
-            )
-            safeSendNotification(ctx.upstream, 'window/showMessage', {
-                type: 1,
-                message: spec.crashMessage
-            })
-            return
+            notifyRetryCap(spec, ctx)
+            throw lastError instanceof Error ? lastError : new Error(`${spec.server} recovery retry cap reached`)
         }
-
-        // The dead server's stored diagnostics are stale; drop them so .vue merges
-        // don't blend pre-crash entries with the other server's fresh publishes.
-        ctx.diagnosticsStore.clearServer(spec.server)
 
         await new Promise<void>((resolve) => setTimeout(resolve, ctx.delayMs))
 
-        if (forceKill) {
-            // Runs after the first await, i.e. with the recovery promise already
-            // published — the killed child's onClose can then tell this self-inflicted
-            // close apart from a spontaneous crash and leave the budget alone.
+        if (shouldForceKill) {
+            // Keep the connection marked until its close is actually observed. A
+            // replacement can fail before SIGTERM produces onClose.
+            ctx.intentionalRecoveryCloses.add(spec.getCurrentConn(ctx))
             spec.killCurrent(ctx)
+            shouldForceKill = false
         }
 
+        // For Vue this awaits the entire active vtsls retry chain and deliberately
+        // rejects on permanent vtsls failure, before any Vue candidate is spawned.
         await spec.beforeSpawn?.(ctx)
 
         const spawned = spec.spawn(ctx)
-        spawned.conn.listen()
-        setupHandlers(spawned.conn)
+        const closeGuard = observeCandidateClose(spawned.conn)
 
         try {
+            spawned.conn.listen()
+            setupHandlers(spawned.conn)
+
             const initParams = spec.buildInitParams(ctx)
             if (initParams !== null) {
-                await spawned.conn.sendRequest('initialize', initParams)
+                await initializeCandidate(spec, ctx, spawned.conn, initParams, closeGuard.closed)
+                if (closeGuard.isClosed()) throw candidateClosedError(spec)
                 safeSendNotification(spawned.conn, 'initialized', {})
                 safeSendNotification(spawned.conn, 'workspace/didChangeConfiguration', {
                     settings: spec.buildSettings(ctx)
@@ -173,62 +257,57 @@ function recoverServer(
                     }
                 })
             }
-        } catch (err: unknown) {
-            // The replacement never became usable; kill it and keep the old connection
-            // published. The old connection's onClose has already fired, so nothing
-            // external will trigger another attempt — schedule one ourselves.
-            //
-            // RetryTracker's sliding window cannot bound this chain (attempts that
-            // outlast windowMs/maxRestarts never accumulate), so a consecutive-failure
-            // counter provides a wall-clock-independent stop.
-            spawned.kill?.()
-            spawned.conn.dispose()
-            const failures = spec.getConsecutiveFailures(ctx) + 1
-            spec.setConsecutiveFailures(ctx, failures)
-            if (failures >= retry.maxRestarts) {
-                logger.error('proxy', `${spec.server}: ${failures} consecutive failed recovery attempts; giving up`)
-                safeSendNotification(ctx.upstream, 'window/showMessage', {
-                    type: 1,
-                    message: spec.crashMessage
-                })
-            } else {
-                setTimeout(() => {
-                    recoverServer(spec, ctx, `retry after failed recovery: ${String(err)}`, setupHandlers, false).catch((retryErr: unknown) => {
-                        logger.error('proxy', `${spec.server} recovery retry error: ${String(retryErr)}`)
-                    })
-                }, ctx.delayMs)
-            }
-            throw err
-        }
 
-        // Publish only now: until the fresh child is initialized and knows about every
-        // open document, upstream notifications must keep routing to the previous
-        // connection. A didChange sent to an uninitialized child is a protocol
-        // violation that can re-crash it, and a didOpen would be duplicated by replay.
-        spec.publish(ctx, spawned.conn, spawned.kill)
+            if (closeGuard.isClosed()) throw candidateClosedError(spec)
 
-        logger.info('proxy', `${spec.server} restarted successfully`)
-        // The give-up budget resets only once the replacement proves stable: a crash
-        // within the stability window counts as another consecutive failure, so a
-        // child that dies shortly after every recovery cannot respawn forever.
-        const publishedAt = Date.now()
-        setupCrashRecoveryFor(spec, ctx, spawned.conn, (r, fk) => {
-            // Only spontaneous closes count toward the budget: a close provoked by an
-            // in-flight forced restart (timeout recovery killing the current child) is
-            // the recovery's own doing, not a crash.
-            if (spec.getRecoveryPromise(ctx) === null) {
+            // Install the post-publication crash observer before publishing. The
+            // candidate close guard makes a close in this narrow window fail the
+            // attempt rather than publishing an already-closed connection.
+            const publishedAt = Date.now()
+            setupCrashRecoveryFor(spec, ctx, spawned.conn, (nextReason, nextForceKill) => {
                 if (Date.now() - publishedAt >= ctx.recoveryStabilityWindowMs) {
                     spec.setConsecutiveFailures(ctx, 0)
                 } else {
                     spec.setConsecutiveFailures(ctx, spec.getConsecutiveFailures(ctx) + 1)
                 }
+                return recoverServer(spec, ctx, nextReason, setupHandlers, nextForceKill ?? false)
+            })
+            if (closeGuard.isClosed()) throw candidateClosedError(spec)
+
+            // Publish exactly once, after initialize, replay, and close-listener setup.
+            spec.publish(ctx, spawned.conn, spawned.kill)
+            logger.info('proxy', `${spec.server} restarted successfully`)
+            return
+        } catch (err: unknown) {
+            disposeFailedCandidate(spec, spawned)
+            lastError = err
+            const failures = spec.getConsecutiveFailures(ctx) + 1
+            spec.setConsecutiveFailures(ctx, failures)
+            if (failures >= retry.maxRestarts) {
+                logger.error('proxy', `${spec.server}: ${failures} consecutive failed recovery attempts; giving up`)
+                notifyRetryCap(spec, ctx)
+                throw err
             }
-            return recoverServer(spec, ctx, r, setupHandlers, fk ?? false)
-        })
-    })().finally(() => {
+            reason = `retry after failed recovery: ${String(err)}`
+        }
+    }
+}
+
+function recoverServer(
+    spec: RecoverySpec,
+    ctx: ProxyContext,
+    reason: string,
+    setupHandlers: (conn: MessageConnection) => void,
+    forceKill: boolean
+): Promise<void> {
+    const active = spec.getRecoveryPromise(ctx)
+    if (active !== null) {
+        return active
+    }
+
+    const recovery = runRecoveryChain(spec, ctx, reason, setupHandlers, forceKill).finally(() => {
         spec.setRecoveryPromise(ctx, null)
     })
-
     spec.setRecoveryPromise(ctx, recovery)
     return recovery
 }

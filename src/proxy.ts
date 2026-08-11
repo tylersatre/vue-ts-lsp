@@ -144,6 +144,7 @@ export function setupProxy(
     // The child shutdown sequence must run at most once, whichever path triggers it
     // first — the LSP shutdown request, a signal, or the upstream connection closing.
     let shutdownStarted = false
+    let exitStarted = false
 
     upstream.onRequest('shutdown', async () => {
         shutdownStarted = true
@@ -152,6 +153,10 @@ export function setupProxy(
     })
 
     function flushLogsAndExit(): void {
+        if (exitStarted) {
+            return
+        }
+        exitStarted = true
         void Promise.resolve(logger.closeFileLogging()).finally(() => process.exit(0))
     }
 

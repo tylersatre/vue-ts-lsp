@@ -48,6 +48,11 @@ import * as logger from './logger.js'
 function setupDownstreamHandlers(ctx: ProxyContext, conn: MessageConnection, server: 'vtsls' | 'vue_ls'): void {
     conn.onNotification('textDocument/publishDiagnostics', (params: unknown) => {
         const p = params as { uri: string; diagnostics: Diagnostic[]; version?: unknown }
+        const activeDiagnosticsConnection = server === 'vtsls' ? ctx.vtslsDiagnosticsConnection : ctx.vueLsDiagnosticsConnection
+        if (conn !== activeDiagnosticsConnection) {
+            logger.debug('proxy', `publishDiagnostics ignored stale ${server} connection uri=${p.uri} count=${p.diagnostics.length}`)
+            return
+        }
         if (isInternalProbeUri(p.uri)) {
             logger.debug('proxy', `publishDiagnostics ignored internal probe uri=${p.uri} count=${p.diagnostics.length}`)
             return
@@ -219,8 +224,9 @@ export function setupDocumentLifecycleHandlers(ctx: ProxyContext): void {
             // protocol violation. Re-sync content as a full-document replacement instead,
             // re-using the incoming version so numbering realigns with the client.
             logger.warn('proxy', `textDocument/didOpen ${uri} for already-open document — forwarding as full-document didChange`)
+            const protocolUri = ctx.documentStore.getProtocolUri(uri) ?? uri
             const changeParams = {
-                textDocument: { uri, version },
+                textDocument: { uri: protocolUri, version },
                 contentChanges: [
                     {
                         range: { start: { line: 0, character: 0 }, end: computeDocumentEnd(existing.content) },
@@ -232,9 +238,9 @@ export function setupDocumentLifecycleHandlers(ctx: ProxyContext): void {
             safeSendNotification(ctx.currentVtsls, 'textDocument/didChange', changeParams)
             if (isVueUri(uri)) {
                 safeSendNotification(ctx.currentVueLs, 'textDocument/didChange', changeParams)
-                scheduleVueDiagnosticsNudge(ctx, uri)
+                scheduleVueDiagnosticsNudge(ctx, protocolUri)
             } else if (isScriptLikeUri(uri)) {
-                scheduleScriptDiagnosticsNudge(ctx, uri)
+                scheduleScriptDiagnosticsNudge(ctx, protocolUri)
             }
             return
         }
@@ -259,6 +265,7 @@ export function setupDocumentLifecycleHandlers(ctx: ProxyContext): void {
         const { uri, version } = didChangeParams.textDocument
         invalidateWorkspaceCachesForUri(ctx, uri)
         const documentBeforeChange = ctx.documentStore.get(uri)
+        const protocolUri = ctx.documentStore.getProtocolUri(uri) ?? uri
 
         if (documentBeforeChange === undefined) {
             const fullText = extractFullTextChange(didChangeParams.contentChanges)
@@ -277,12 +284,18 @@ export function setupDocumentLifecycleHandlers(ctx: ProxyContext): void {
             logger.warn('proxy', `textDocument/didChange ${uri} v${version} for unopened document with ranged changes — forwarding as-is`)
         }
 
-        let forwardedChangeParams: unknown = params
+        let forwardedChangeParams: unknown =
+            protocolUri === uri
+                ? params
+                : {
+                      textDocument: { ...didChangeParams.textDocument, uri: protocolUri },
+                      contentChanges: didChangeParams.contentChanges
+                  }
         if (documentBeforeChange !== undefined) {
             const patchedChanges = patchFullDocReplacements(didChangeParams.contentChanges, documentBeforeChange.content)
             if (patchedChanges !== didChangeParams.contentChanges) {
                 forwardedChangeParams = {
-                    textDocument: didChangeParams.textDocument,
+                    textDocument: { ...didChangeParams.textDocument, uri: protocolUri },
                     contentChanges: patchedChanges
                 }
                 logger.debug('proxy', `textDocument/didChange ${uri} v${version}: patched full-doc replacement`)
@@ -295,24 +308,31 @@ export function setupDocumentLifecycleHandlers(ctx: ProxyContext): void {
         safeSendNotification(ctx.currentVtsls, 'textDocument/didChange', forwardedChangeParams)
         if (isVueUri(uri)) {
             safeSendNotification(ctx.currentVueLs, 'textDocument/didChange', forwardedChangeParams)
-            scheduleVueDiagnosticsNudge(ctx, uri)
+            scheduleVueDiagnosticsNudge(ctx, protocolUri)
         } else if (isScriptLikeUri(uri)) {
-            scheduleScriptDiagnosticsNudge(ctx, uri)
-            scheduleScriptDependentDiagnosticsNudge(ctx, uri, documentBeforeChange?.content ?? null, didChangeParams.contentChanges)
+            scheduleScriptDiagnosticsNudge(ctx, protocolUri)
+            scheduleScriptDependentDiagnosticsNudge(ctx, protocolUri, documentBeforeChange?.content ?? null, didChangeParams.contentChanges)
         }
     })
 
     ctx.upstream.onNotification('textDocument/didClose', (params: unknown) => {
         const didCloseParams = params as { textDocument: { uri: string } }
         const { uri } = didCloseParams.textDocument
+        const protocolUri = ctx.documentStore.getProtocolUri(uri) ?? uri
         ctx.documentStore.close(uri)
         invalidateWorkspaceCachesForUri(ctx, uri)
         ctx.diagnosticsStore.remove(uri)
+        if (protocolUri !== uri) {
+            ctx.diagnosticsStore.remove(protocolUri)
+        }
         ctx.lastVtslsDiagnosticsAt.delete(uri)
+        ctx.lastVtslsDiagnosticsAt.delete(protocolUri)
         clearDiagnosticNudgesForUri(ctx, uri)
-        safeSendNotification(ctx.currentVtsls, 'textDocument/didClose', params)
+        clearDiagnosticNudgesForUri(ctx, protocolUri)
+        const forwardedParams = protocolUri === uri ? params : { textDocument: { uri: protocolUri } }
+        safeSendNotification(ctx.currentVtsls, 'textDocument/didClose', forwardedParams)
         if (isVueUri(uri)) {
-            safeSendNotification(ctx.currentVueLs, 'textDocument/didClose', params)
+            safeSendNotification(ctx.currentVueLs, 'textDocument/didClose', forwardedParams)
         }
     })
 
@@ -321,9 +341,11 @@ export function setupDocumentLifecycleHandlers(ctx: ProxyContext): void {
         const { uri } = didSaveParams.textDocument
         // Disk content changed; any cached disk read for this URI is stale.
         invalidateWorkspaceCachesForUri(ctx, uri)
-        safeSendNotification(ctx.currentVtsls, 'textDocument/didSave', params)
+        const protocolUri = ctx.documentStore.getProtocolUri(uri) ?? uri
+        const forwardedParams = protocolUri === uri ? params : { ...didSaveParams, textDocument: { ...didSaveParams.textDocument, uri: protocolUri } }
+        safeSendNotification(ctx.currentVtsls, 'textDocument/didSave', forwardedParams)
         if (isVueUri(uri)) {
-            safeSendNotification(ctx.currentVueLs, 'textDocument/didSave', params)
+            safeSendNotification(ctx.currentVueLs, 'textDocument/didSave', forwardedParams)
         }
     })
 }
