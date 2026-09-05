@@ -8,7 +8,7 @@ Open an issue using the [bug report template](https://github.com/tylersatre/vue-
 
 ## Development Setup
 
-**Prerequisites:** Node.js >= 18, npm
+**Prerequisites:** Node.js >= 20.19.0 (see `package.json`), npm
 
 ```bash
 git clone https://github.com/tylersatre/vue-ts-lsp.git
@@ -24,12 +24,18 @@ npm run typecheck
 
 1. Branch from `main`
 2. Make your changes
-3. Run `npm run format:check`, `npm test`, and `npm run typecheck` — all must pass
+3. For code changes, run `npm run format:check`, `npm test`, and `npm run typecheck` — all must pass. For documentation-only changes, check formatting on the changed files (for example, `npx prettier --check AGENTS.md CONTRIBUTING.md`), links, and referenced commands or source facts.
 4. Open a pull request describing what you changed and why
+
+Report which checks ran and whether smoke tests were skipped. CI runs repository formatting, typechecks, stdout safety checks, and tests with smoke fixture dependencies and coverage thresholds for every pull request.
+
+## AI-Assisted Contributions
+
+[AGENTS.md](AGENTS.md) is the shared instruction source for coding agents, including Codex using GPT-6 Astra. Keep repository guidance there; [CLAUDE.md](CLAUDE.md) imports it for Claude Code. These instructions guide work on this repository; they do not select the coding agent's model or change the proxy's supported client.
 
 ## Architecture
 
-The proxy sits between Claude Code and two child language servers (vtsls + vue-language-server). See [CLAUDE.md](CLAUDE.md) for architectural details.
+The proxy sits between Claude Code and two child language servers (vtsls + vue-language-server). See [AGENTS.md](AGENTS.md) for architectural details.
 
 ## Critical Constraint: stdout Is Sacred
 

@@ -8,7 +8,7 @@
 
 ## Testing
 
-<!-- How was this tested? -->
+<!-- List checks run and results, including any skipped smoke tests. For documentation-only changes, report formatting/link checks and mark runtime checks below N/A. -->
 
 ## Checklist
 

@@ -2,20 +2,40 @@
 
 JSON-RPC proxy that sits between Claude Code and two downstream language servers (vtsls + vue-language-server), providing unified Vue + TypeScript LSP support.
 
+This is the shared repository guide for coding agents, including Codex using GPT-6 Astra. `CLAUDE.md` imports this file; maintain shared instructions here. References to Claude Code describe the proxy's LSP client, independently of which coding agent edits this repository.
+
+## Working Agreement
+
+- Carry an implementation request through investigation, edits, and appropriate verification. Resolve routine details from the code and context; ask when a missing decision materially changes scope or behavior. Continue independent work while awaiting an answer. Respect requests for read-only investigation or a proposal before editing.
+- Follow explicit user instructions over repository workflow defaults and skill guidance, within the host's higher-priority instructions and permissions. If a local instruction blocks progress, identify its file and exact wording and explain the conflict. Do not invent an approval requirement from a recommendation.
+- Inspect the working tree before editing. Preserve unrelated changes, untracked files, and local configuration. Keep the diff focused on the requested outcome.
+- Trace claims through source and relevant tests. Treat handoffs, drafts, and version-specific client observations as evidence to verify, not standing instructions. Re-audit client behavior before updating the recorded version or removing a compatibility workaround.
+- Use subagents only when requested by the user or applicable instructions and supported by the host. Give each a bounded task, avoid overlapping edits, and review its evidence before integrating findings.
+- Give concise progress updates and a final report covering the result, relevant file references, verification, and remaining limitations. Distinguish checks actually run from assumptions or skipped checks.
+
+The workflow guidance follows the [official GPT-6 Astra prompting guidance](https://developers.openai.com/api/docs/guides/latest-model#prompting-best-practices), reviewed on 2026-09-05. It does not configure a model or add an OpenAI API dependency.
+
 ## Build Commands
+
+Use Node.js >= 20.19.0 and npm, matching `package.json`.
 
 ```bash
 npm run build                 # tsup: src/index.ts → dist/index.js (ESM, with shebang)
 npm run typecheck             # two projects: typecheck:src + typecheck:tests (both tsc --noEmit)
 npm test                      # vitest run (unit + integration + smoke; smoke self-skips without the fixture)
 npm run test:coverage         # vitest run --coverage (v8, thresholds enforced in CI)
-npm run install:smoke-fixture # install tests/fixtures/app-workspace deps so smoke tests run
+npm run install:smoke-fixture  # install tests/fixtures/app-workspace deps so smoke tests run
+npm run format:check          # read-only repository formatting check
 npm run format                # prettier --write; format:check runs in CI
 ```
+
+For a focused edit, run Prettier on the changed files rather than formatting unrelated work.
 
 ## Critical Constraint: stdout Is Sacred
 
 `process.stdout` is the JSON-RPC transport to Claude Code. Any stray write to stdout (e.g., `console.log`) will corrupt the protocol. **All logging MUST go to stderr** via the logger module.
+
+This constraint applies to the running proxy and code that writes to its transport. Normal shell output from builds, tests, and inspection commands is fine. CI bans all `console.*` calls in `src/`; use `src/logger.ts` even for error logging.
 
 ## Architecture
 
@@ -76,6 +96,7 @@ vtsls has a confirmed bug where full-document replacements (no `range` in conten
 ## Key Documentation
 
 - `README.md` — installation, usage, and current limitations
+- `CONTRIBUTING.md` — development setup and contribution checks
 
 ## Plugin Files
 
@@ -84,4 +105,10 @@ vtsls has a confirmed bug where full-document replacements (no `range` in conten
 
 ## Testing
 
-Tests live under `tests/`: fast module coverage in `tests/unit/`, proxy behavior coverage in `tests/integration/` (13 files split along subsystem lines; the shared mock `MessageConnection` harness with `triggerRequest`/`triggerNotification` helpers lives in `tests/integration/helpers/harness.ts`), and real-child smoke coverage in `tests/smoke/`. The checked-in smoke workspace lives at `tests/fixtures/app-workspace`.
+Tests live under `tests/`: fast module coverage in `tests/unit/`, proxy behavior coverage in `tests/integration/` (split along subsystem lines; the shared mock `MessageConnection` harness with `triggerRequest`/`triggerNotification` helpers lives in `tests/integration/helpers/harness.ts`), and real-child smoke coverage in `tests/smoke/`. The checked-in smoke workspace lives at `tests/fixtures/app-workspace`.
+
+- For a behavior change, add or update a regression test that exercises the failure scenario. Start with the relevant test file, for example `npm test -- tests/integration/document-sync.test.ts`.
+- For code changes, complete the contribution checks in `CONTRIBUTING.md`. CI additionally installs the smoke fixture and enforces coverage thresholds; do not weaken those checks to make a change pass.
+- For documentation-only changes, check formatting, links, and referenced commands or source facts. Do not add tests that only assert documentation wording or run the runtime suite solely for a prose edit.
+- Report whether real-child smoke tests ran. They self-skip without fixture dependencies; diagnostic smoke cases additionally require `VUE_TS_LSP_RUN_DIAGNOSTIC_SMOKE=1`. A passing mock test or skipped smoke suite does not establish real-server or Claude Code behavior.
+- Once relevant checks pass, broaden or repeat them only for new changes, failures, or unresolved concerns. If a check is blocked, report the command and reason and continue the work that remains possible.
