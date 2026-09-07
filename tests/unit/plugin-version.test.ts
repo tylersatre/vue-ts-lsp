@@ -51,6 +51,6 @@ describe('plugin manifest version', () => {
 
         expect(pkg.scripts['version-packages']).toContain('changeset version')
         expect(pkg.scripts['version-packages']).toContain('sync-plugin-version.mjs')
-        expect(releaseWorkflow).toContain('version: npm run version-packages')
+        expect(releaseWorkflow).toContain('version-script: npm run version-packages')
     })
 })
