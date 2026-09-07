@@ -35,6 +35,88 @@ describe('graceful shutdown', () => {
         capabilities: {}
     }
 
+    it('does not restart children that close during shutdown', async () => {
+        const upstream = createMockConnection()
+        const vtsls = createMockConnection()
+        const vueLs = createMockConnection()
+        const spawnVtsls = vi.fn(() => createMockConnection() as unknown as MessageConnection)
+        setupProxy(upstream as unknown as MessageConnection, vtsls as unknown as MessageConnection, vueLs as unknown as MessageConnection, {
+            spawnVtsls,
+            delayMs: 0
+        })
+        await upstream.triggerRequest('initialize', initParams)
+        vtsls.sendRequest.mockImplementation(async () => {
+            vtsls.triggerClose()
+            return null
+        })
+
+        await upstream.triggerRequest('shutdown')
+        await new Promise((resolve) => setTimeout(resolve, 10))
+
+        expect(spawnVtsls).not.toHaveBeenCalled()
+    })
+
+    it('does not spawn a replacement when shutdown starts during the recovery delay', async () => {
+        const upstream = createMockConnection()
+        const vtsls = createMockConnection()
+        const vueLs = createMockConnection()
+        const spawnVtsls = vi.fn(() => createMockConnection() as unknown as MessageConnection)
+        setupProxy(upstream as unknown as MessageConnection, vtsls as unknown as MessageConnection, vueLs as unknown as MessageConnection, {
+            spawnVtsls,
+            delayMs: 10
+        })
+        await upstream.triggerRequest('initialize', initParams)
+        vtsls.triggerClose()
+
+        await upstream.triggerRequest('shutdown')
+        await new Promise((resolve) => setTimeout(resolve, 20))
+
+        expect(spawnVtsls).not.toHaveBeenCalled()
+    })
+
+    it('disposes an initializing replacement when shutdown starts without waiting for initialize', async () => {
+        const upstream = createMockConnection()
+        const vtsls = createMockConnection()
+        const vueLs = createMockConnection()
+        const candidate = createMockConnection()
+        const initializing = createDeferred<void>()
+        candidate.sendRequest.mockImplementation(() => {
+            initializing.resolve()
+            return new Promise(() => {})
+        })
+        const killCandidate = vi.fn()
+        setupProxy(upstream as unknown as MessageConnection, vtsls as unknown as MessageConnection, vueLs as unknown as MessageConnection, {
+            spawnVtsls: () => ({ conn: candidate as unknown as MessageConnection, kill: killCandidate }),
+            delayMs: 0
+        })
+        await upstream.triggerRequest('initialize', initParams)
+        vtsls.triggerClose()
+        await initializing.promise
+
+        const shutdown = upstream.triggerRequest('shutdown')
+        // Cleanup must happen synchronously: an exit notification may follow before
+        // recovery promise continuations get a chance to run.
+        expect(killCandidate).toHaveBeenCalledOnce()
+        await shutdown
+
+        expect(killCandidate).toHaveBeenCalledOnce()
+        expect(candidate.dispose).toHaveBeenCalledOnce()
+        expect(candidate.sendNotification).not.toHaveBeenCalledWith('initialized', {})
+    })
+
+    it('shares child shutdown across duplicate shutdown requests', async () => {
+        const upstream = createMockConnection()
+        const vtsls = createMockConnection()
+        const vueLs = createMockConnection()
+        setupProxy(upstream as unknown as MessageConnection, vtsls as unknown as MessageConnection, vueLs as unknown as MessageConnection)
+        await upstream.triggerRequest('initialize', initParams)
+
+        await Promise.all([upstream.triggerRequest('shutdown'), upstream.triggerRequest('shutdown')])
+
+        expect(vtsls.sendRequest.mock.calls.filter(([method]) => method === 'shutdown')).toHaveLength(1)
+        expect(vueLs.sendRequest.mock.calls.filter(([method]) => method === 'shutdown')).toHaveLength(1)
+    })
+
     it('sends shutdown request to both servers on LSP shutdown', async () => {
         const upstream = createMockConnection()
         const vtslsConn = createMockConnection()

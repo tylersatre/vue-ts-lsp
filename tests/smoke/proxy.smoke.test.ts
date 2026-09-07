@@ -3,6 +3,7 @@ import path from 'node:path'
 import { PassThrough } from 'node:stream'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createMessageConnection, StreamMessageReader, StreamMessageWriter, type MessageConnection } from 'vscode-jsonrpc/node'
+import { Range } from 'vscode-languageserver-protocol'
 import { isDefinitionMirrorUri } from '@src/definition-mirrors.js'
 import { resolveVueTypescriptPluginLocation, setupProxy } from '@src/proxy.js'
 import { spawnServer, vtslsCommand, vueLsCommand } from '@src/spawn.js'
@@ -248,6 +249,16 @@ function extractCallHierarchyNames(calls: unknown[], side: 'from' | 'to'): strin
     })
 }
 
+function expectCallHierarchyRanges(calls: unknown[]): void {
+    for (const call of calls) {
+        expect(call).toHaveProperty('fromRanges')
+        const ranges = (call as { fromRanges: unknown[] }).fromRanges
+        expect(Array.isArray(ranges)).toBe(true)
+        expect(ranges.length).toBeGreaterThan(0)
+        expect(ranges.every(Range.is)).toBe(true)
+    }
+}
+
 async function createProxyHarness(): Promise<ProxyHarness> {
     const pair = createConnectionPair()
     const { command: vtslsBin, args: vtslsArgs } = vtslsCommand()
@@ -272,7 +283,9 @@ async function createProxyHarness(): Promise<ProxyHarness> {
     await pair.client.sendRequest('initialize', {
         rootUri: ROOT_URI,
         workspaceFolders: workspaceFolders(),
-        capabilities: {}
+        capabilities: {
+            textDocument: { publishDiagnostics: { versionSupport: true } }
+        }
     })
     pair.client.sendNotification('initialized', {})
     pair.client.sendNotification('textDocument/didOpen', {
@@ -1030,6 +1043,8 @@ smokeDescribe('proxy smoke tests with real child servers', () => {
 
             expect(incoming.length).toBeGreaterThan(0)
             expect(outgoing.length).toBeGreaterThan(0)
+            expectCallHierarchyRanges(incoming)
+            expectCallHierarchyRanges(outgoing)
             expect(extractCallHierarchyNames(outgoing, 'to')).toContain('emit')
         },
         SMOKE_TIMEOUT_MS
@@ -1060,6 +1075,7 @@ smokeDescribe('proxy smoke tests with real child servers', () => {
                 name: 'buildSummary'
             })
             expect(outgoing.length).toBeGreaterThan(0)
+            expectCallHierarchyRanges(outgoing)
             expect(extractCallHierarchyNames(outgoing, 'to')).toContain('formatCurrency')
         },
         SMOKE_TIMEOUT_MS
@@ -1086,6 +1102,7 @@ smokeDescribe('proxy smoke tests with real child servers', () => {
             })) as Array<{ from?: { uri?: string } }>
 
             expect(incoming.length).toBeGreaterThan(0)
+            expectCallHierarchyRanges(incoming)
             expect(incoming.some((call) => call.from?.uri === ITEM_DETAILS_URI)).toBe(true)
         },
         SMOKE_TIMEOUT_MS
@@ -1401,6 +1418,81 @@ diagnosticDescribe('diagnostic smoke baselines', () => {
                 name: 'buildSummary'
             })
             expect(rawPrepared).toBeNull()
+        },
+        SMOKE_TIMEOUT_MS
+    )
+})
+
+diagnosticDescribe('diagnostics after full-text edits', () => {
+    let proxyHarness: ProxyHarness
+
+    beforeAll(async () => {
+        proxyHarness = await createProxyHarness()
+    }, SMOKE_TIMEOUT_MS)
+
+    afterAll(async () => {
+        await proxyHarness.cleanup()
+    }, SMOKE_TIMEOUT_MS)
+
+    it.each([
+        {
+            name: 'Vue template',
+            uri: BUTTON_COMPONENT_URI,
+            original: BUTTON_COMPONENT_TEXT,
+            broken: BUTTON_COMPONENT_TEXT.replace('{{ buttonText }}', '{{ buttonText.toFixed(2) }}'),
+            diagnosticCode: 2551
+        },
+        {
+            name: 'TypeScript',
+            uri: DRAFT_SYNC_URI,
+            original: DRAFT_SYNC_TEXT,
+            broken: `${DRAFT_SYNC_TEXT}\nexport const diagnosticSmokeValue: string = 123;\n`,
+            diagnosticCode: 2322
+        }
+    ])(
+        'publishes and clears a $name type error after full-text edits',
+        async ({ uri, original, broken, diagnosticCode }) => {
+            expect(broken).not.toBe(original)
+            const start = proxyHarness.diagnostics.length
+            try {
+                await proxyHarness.client.sendNotification('textDocument/didChange', {
+                    textDocument: { uri, version: 2 },
+                    contentChanges: [{ text: broken }]
+                })
+                await waitForValue('type error for document version 2', async () => {
+                    return (
+                        proxyHarness.diagnostics
+                            .slice(start)
+                            .find(
+                                (entry) =>
+                                    entry.uri === uri &&
+                                    entry.version === 2 &&
+                                    entry.diagnostics.some(
+                                        (diagnostic) =>
+                                            diagnostic !== null && typeof diagnostic === 'object' && 'code' in diagnostic && diagnostic.code === diagnosticCode
+                                    )
+                            ) ?? null
+                    )
+                }).catch((error: unknown) => {
+                    throw new Error(`${String(error)}; received ${JSON.stringify(proxyHarness.diagnostics.slice(start).filter((entry) => entry.uri === uri))}`)
+                })
+            } finally {
+                await proxyHarness.client.sendNotification('textDocument/didChange', {
+                    textDocument: { uri, version: 3 },
+                    contentChanges: [{ text: original }]
+                })
+            }
+
+            await waitForValue('cleared type error for document version 3', async () => {
+                return proxyHarness.diagnostics.slice(start).find((entry) => entry.uri === uri && entry.version === 3 && entry.diagnostics.length === 0) ?? null
+            })
+
+            const pulled = (await proxyHarness.client.sendRequest('textDocument/diagnostic', { textDocument: { uri } })) as {
+                kind: string
+                items: Array<{ code?: string | number }>
+            }
+            expect(pulled.kind).toBe('full')
+            expect(pulled.items.some((diagnostic) => diagnostic.code === diagnosticCode)).toBe(false)
         },
         SMOKE_TIMEOUT_MS
     )

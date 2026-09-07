@@ -169,7 +169,7 @@ export function findReferenceTargetAtPosition(uri: string, text: string, positio
         let current: ts.Node | undefined = node
         while (current !== undefined) {
             const match = buildReferenceTargetMatch(current, sourceFile, target.contentStart, text)
-            if (match !== null) {
+            if (match !== null && rangeContains(match.selectionRange, position)) {
                 return match
             }
             current = current.parent
@@ -356,7 +356,8 @@ export function collectReferenceTargetsForChanges(
     const targets: ReferenceTarget[] = []
     const seenTargets = new Set<string>()
     for (const probe of probes) {
-        const target = findReferenceTargetAtPosition(uri, probe.text, probe.position) ?? findEnclosingReferenceTargetAtPosition(uri, probe.text, probe.position)
+        // Edits affect the enclosing declaration even when the changed token is a parameter or return type.
+        const target = findEnclosingReferenceTargetAtPosition(uri, probe.text, probe.position) ?? findReferenceTargetAtPosition(uri, probe.text, probe.position)
         if (target === null) {
             continue
         }

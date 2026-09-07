@@ -96,4 +96,32 @@ describe('DiagnosticsStore', () => {
         const result = store.update('file:///App.vue', 'vtsls', [diag, diag])
         expect(result).toHaveLength(1)
     })
+    it('merges servers only within the same known document version', () => {
+        const first = makeDiag(0, 0, 0, 1, 'first')
+        const second = makeDiag(1, 0, 1, 1, 'second')
+        store.update('file:///App.vue', 'vtsls', [first], 1)
+        expect(store.update('file:///App.vue', 'vue_ls', [second], 1)).toEqual([first, second])
+        expect(store.update('file:///App.vue', 'vtsls', [], 2)).toEqual([])
+        expect(store.getVersion('file:///App.vue')).toBe(2)
+    })
+
+    it('does not overwrite newer diagnostics with an older version', () => {
+        const current = makeDiag(0, 0, 0, 1, 'current')
+        store.update('file:///App.vue', 'vue_ls', [current], 2)
+        expect(store.update('file:///App.vue', 'vue_ls', [], 1)).toEqual([current])
+        expect(store.getVersion('file:///App.vue')).toBe(2)
+    })
+
+    it('drops unknown-version snapshots when a known version arrives', () => {
+        store.update('file:///App.vue', 'vue_ls', [makeDiag(0, 0, 0, 1, 'unknown')])
+        expect(store.update('file:///App.vue', 'vtsls', [], 1)).toEqual([])
+    })
+
+    it('forgets the version on close so a new document can restart numbering', () => {
+        store.update('file:///App.vue', 'vtsls', [], 10)
+        store.remove('file:///App.vue')
+        expect(store.getVersion('file:///App.vue')).toBeUndefined()
+        const current = makeDiag(0, 0, 0, 1, 'reopened')
+        expect(store.update('file:///App.vue', 'vue_ls', [current], 1)).toEqual([current])
+    })
 })

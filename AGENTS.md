@@ -68,7 +68,7 @@ Claude Code (verified against 2.1.226; re-verify and bump this version when clie
 
 ### Diagnostics versioning
 
-Forwarded `textDocument/publishDiagnostics` carry a `version`: the downstream server's reported version when present (vue_ls reports one, vtsls never does), else the document store's version at forward time. Claude Code drops publishes whose version is older than its tracked document version, which prevents pre-edit diagnostics from being attributed to the current edit. The `DiagnosticsStore` is cleared per-URI on `didClose` and per-server on crash recovery so merges never blend stale entries.
+Forwarded `textDocument/publishDiagnostics` carry a `version`: the downstream server's reported version when present (vue_ls reports one, vtsls never does), else the document store's version at forward time. The proxy rejects known older versions and merges only snapshots belonging to the same tracked version. An unversioned vtsls publish cannot reveal which content was originally diagnosed, so its arrival-time stamp does not prove freshness. The `DiagnosticsStore` is cleared per-URI on `didClose` and per-server on crash recovery; pull diagnostics reject results if the document changes while requests are in flight.
 
 ### Crash recovery
 

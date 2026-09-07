@@ -105,6 +105,7 @@ const VUE_LS_SPEC: RecoverySpec = {
 function setupCrashRecoveryFor(spec: RecoverySpec, ctx: ProxyContext, conn: MessageConnection, recoverFn: RecoverFn): void {
     if (!spec.canSpawn(ctx)) return
     conn.onClose(() => {
+        if (ctx.shuttingDown) return
         if (ctx.intentionalRecoveryCloses.delete(conn)) {
             logger.debug('proxy', `${spec.server} ignored intentional recovery close`)
             return
@@ -160,9 +161,15 @@ function observeCandidateClose(conn: MessageConnection): { closed: Promise<void>
 
 async function initializeCandidate(spec: RecoverySpec, ctx: ProxyContext, conn: MessageConnection, initParams: unknown, closed: Promise<void>): Promise<void> {
     let timer: ReturnType<typeof setTimeout> | null = null
+    let onShutdown!: () => void
+    const shutdown = new Promise<never>((_, reject) => {
+        onShutdown = () => reject(new Error(`${spec.server} recovery stopped by shutdown`))
+        ctx.recoveryShutdownHandlers.add(onShutdown)
+    })
     try {
         await Promise.race([
             conn.sendRequest('initialize', initParams),
+            shutdown,
             closed.then(() => {
                 throw new Error(`${spec.server} replacement connection closed during initialization`)
             }),
@@ -173,6 +180,7 @@ async function initializeCandidate(spec: RecoverySpec, ctx: ProxyContext, conn: 
             })
         ])
     } finally {
+        ctx.recoveryShutdownHandlers.delete(onShutdown)
         if (timer !== null) {
             clearTimeout(timer)
         }
@@ -214,6 +222,7 @@ async function runRecoveryChain(
         }
 
         await new Promise<void>((resolve) => setTimeout(resolve, ctx.delayMs))
+        if (ctx.shuttingDown) return
 
         if (shouldForceKill) {
             // Keep the connection marked until its close is actually observed. A
@@ -226,17 +235,30 @@ async function runRecoveryChain(
         // For Vue this awaits the entire active vtsls retry chain and deliberately
         // rejects on permanent vtsls failure, before any Vue candidate is spawned.
         await spec.beforeSpawn?.(ctx)
+        if (ctx.shuttingDown) return
 
-        const spawned = spec.spawn(ctx)
-        const closeGuard = observeCandidateClose(spawned.conn)
-
+        let disposeCandidate: (() => void) | null = null
         try {
+            // A synchronous spawn failure consumes the same bounded attempt budget
+            // as a candidate that starts but fails initialization.
+            const spawned = spec.spawn(ctx)
+            let disposed = false
+            disposeCandidate = (): void => {
+                if (disposed) return
+                disposed = true
+                disposeFailedCandidate(spec, spawned)
+            }
+            // Shutdown can exit before promise continuations run; release unpublished
+            // children synchronously, including candidates whose initialize never settles.
+            ctx.recoveryShutdownHandlers.add(disposeCandidate)
+            const closeGuard = observeCandidateClose(spawned.conn)
             spawned.conn.listen()
             setupHandlers(spawned.conn)
 
             const initParams = spec.buildInitParams(ctx)
             if (initParams !== null) {
                 await initializeCandidate(spec, ctx, spawned.conn, initParams, closeGuard.closed)
+                if (ctx.shuttingDown) throw new Error(`${spec.server} recovery stopped by shutdown`)
                 if (closeGuard.isClosed()) throw candidateClosedError(spec)
                 safeSendNotification(spawned.conn, 'initialized', {})
                 safeSendNotification(spawned.conn, 'workspace/didChangeConfiguration', {
@@ -279,7 +301,8 @@ async function runRecoveryChain(
             logger.info('proxy', `${spec.server} restarted successfully`)
             return
         } catch (err: unknown) {
-            disposeFailedCandidate(spec, spawned)
+            disposeCandidate?.()
+            if (ctx.shuttingDown) return
             lastError = err
             const failures = spec.getConsecutiveFailures(ctx) + 1
             spec.setConsecutiveFailures(ctx, failures)
@@ -289,6 +312,8 @@ async function runRecoveryChain(
                 throw err
             }
             reason = `retry after failed recovery: ${String(err)}`
+        } finally {
+            if (disposeCandidate !== null) ctx.recoveryShutdownHandlers.delete(disposeCandidate)
         }
     }
 }
@@ -300,6 +325,7 @@ function recoverServer(
     setupHandlers: (conn: MessageConnection) => void,
     forceKill: boolean
 ): Promise<void> {
+    if (ctx.shuttingDown) return Promise.resolve()
     const active = spec.getRecoveryPromise(ctx)
     if (active !== null) {
         return active

@@ -266,9 +266,9 @@ export function isIncomingCallLike(value: unknown): value is IncomingCallLike {
         typeof value === 'object' &&
         'from' in value &&
         isCallHierarchyItem((value as { from: unknown }).from) &&
-        'fromSpans' in value &&
-        Array.isArray((value as { fromSpans: unknown }).fromSpans) &&
-        (value as { fromSpans: unknown[] }).fromSpans.every(isRange)
+        'fromRanges' in value &&
+        Array.isArray((value as { fromRanges: unknown }).fromRanges) &&
+        (value as { fromRanges: unknown[] }).fromRanges.every(isRange)
     )
 }
 
@@ -277,11 +277,11 @@ export function rangeKey(range: Range): string {
 }
 
 export function mergeIncomingCallResults(initialResult: unknown, fallback: unknown[]): unknown {
-    if (!Array.isArray(initialResult) || fallback.length === 0) {
+    if (fallback.length === 0) {
         return initialResult
     }
 
-    const merged = [...initialResult]
+    const merged = Array.isArray(initialResult) ? [...initialResult] : []
     const byKey = new Map<string, IncomingCallLike>()
 
     for (const entry of merged) {
@@ -304,13 +304,13 @@ export function mergeIncomingCallResults(initialResult: unknown, fallback: unkno
             continue
         }
 
-        const spanKeys = new Set(existing.fromSpans.map(rangeKey))
-        for (const span of entry.fromSpans) {
+        const spanKeys = new Set(existing.fromRanges.map(rangeKey))
+        for (const span of entry.fromRanges) {
             const key = rangeKey(span)
             if (spanKeys.has(key)) {
                 continue
             }
-            existing.fromSpans.push(span)
+            existing.fromRanges.push(span)
             spanKeys.add(key)
         }
     }

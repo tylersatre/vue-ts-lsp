@@ -29,6 +29,8 @@ export interface ProxyContext {
     loggedVueTsWarmup: boolean
 
     // Recovery & timing
+    shuttingDown: boolean
+    recoveryShutdownHandlers: Set<() => void>
     delayMs: number
     requestTimeoutMs: number
     vtslsRetry: RetryTracker
@@ -85,6 +87,8 @@ export function createProxyContext(
         initializeCompletedAt: 0,
         loggedVueTsWarmup: false,
 
+        shuttingDown: false,
+        recoveryShutdownHandlers: new Set(),
         delayMs: crashOptions?.delayMs ?? 1000,
         requestTimeoutMs: crashOptions?.requestTimeoutMs ?? DOWNSTREAM_REQUEST_TIMEOUT_MS,
         vtslsRetry: new RetryTracker(crashOptions?.maxRestarts, crashOptions?.windowMs),

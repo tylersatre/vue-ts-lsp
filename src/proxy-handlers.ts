@@ -1,5 +1,6 @@
 import fs from 'node:fs'
-import type { MessageConnection } from 'vscode-jsonrpc/node'
+import { ResponseError, type MessageConnection } from 'vscode-jsonrpc/node'
+import { LSPErrorCodes } from 'vscode-languageserver-protocol'
 import type { ProxyContext } from './proxy-context.js'
 import type { ContentChange } from './proxy-types.js'
 import { computeDocumentEnd } from './documents.js'
@@ -57,12 +58,18 @@ function setupDownstreamHandlers(ctx: ProxyContext, conn: MessageConnection, ser
             logger.debug('proxy', `publishDiagnostics ignored internal probe uri=${p.uri} count=${p.diagnostics.length}`)
             return
         }
+        const version = resolveDiagnosticsVersion(ctx, p.uri, p.version)
+        const openVersion = ctx.documentStore.get(p.uri)?.version
+        const currentVersion = openVersion ?? ctx.diagnosticsStore.getVersion(p.uri)
+        if (version !== undefined && currentVersion !== undefined && (openVersion !== undefined ? version !== openVersion : version < currentVersion)) {
+            logger.debug('proxy', `publishDiagnostics ignored stale ${server} version=${version} current=${currentVersion} uri=${p.uri}`)
+            return
+        }
         if (server === 'vtsls') {
             ctx.lastVtslsDiagnosticsAt.set(p.uri, Date.now())
         }
-        const version = resolveDiagnosticsVersion(ctx, p.uri, p.version)
         if (isVueUri(p.uri)) {
-            const merged = ctx.diagnosticsStore.update(p.uri, server, p.diagnostics)
+            const merged = ctx.diagnosticsStore.update(p.uri, server, p.diagnostics, version)
             logDiagnostics(server, p.uri, p.diagnostics.length, merged.length)
             forwardDiagnosticsUpstream(ctx, p.uri, merged, version)
         } else {
@@ -149,6 +156,7 @@ export function setupTsserverRequestHandler(ctx: ProxyContext, conn: MessageConn
 
 /** Sends didOpen to the servers responsible for the document and records it in the store. */
 export function openDocumentOnServers(ctx: ProxyContext, uri: string, languageId: string, version: number, text: string): void {
+    ctx.diagnosticsStore.remove(uri)
     ctx.documentStore.open(uri, languageId, version, text)
     invalidateWorkspaceCachesForUri(ctx, uri)
     const params = { textDocument: { uri, languageId, version, text } }
@@ -216,6 +224,8 @@ export function setupDocumentLifecycleHandlers(ctx: ProxyContext): void {
             }
         }
         const { uri, languageId, version, text } = didOpenParams.textDocument
+        // Opening (or re-syncing) starts a fresh content snapshot, possibly with reset versions.
+        ctx.diagnosticsStore.remove(uri)
         invalidateWorkspaceCachesForUri(ctx, uri)
 
         const existing = ctx.documentStore.get(uri)
@@ -416,16 +426,21 @@ export function setupPullDiagnosticHandler(ctx: ProxyContext): void {
             return { kind: 'full', items: [] }
         }
 
+        const document = ctx.documentStore.get(uri)
+        const version = document?.version
         const [syntactic, semantic] = await Promise.all([
             requestTsserverDiagnostics(ctx, 'syntacticDiagnosticsSync', file),
             requestTsserverDiagnostics(ctx, 'semanticDiagnosticsSync', file)
         ])
+        if (ctx.documentStore.get(uri) !== document || ctx.documentStore.get(uri)?.version !== version) {
+            throw new ResponseError(LSPErrorCodes.ContentModified, 'Document changed while diagnostics were requested')
+        }
         const items = dedupeDiagnostics([...syntactic, ...semantic])
         if (isVueUri(uri)) {
             ctx.lastVtslsDiagnosticsAt.set(uri, Date.now())
             // The tsserver sync commands only cover the vtsls side; fold in the latest
             // vue_ls push diagnostics so the pull response matches the merged push view.
-            const merged = ctx.diagnosticsStore.update(uri, 'vtsls', items)
+            const merged = ctx.diagnosticsStore.update(uri, 'vtsls', items, version)
             return { kind: 'full', items: merged }
         }
         return { kind: 'full', items }

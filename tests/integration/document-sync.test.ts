@@ -1348,7 +1348,7 @@ describe('document synchronization forwarding', () => {
         expect((publish![1] as { version?: number }).version).toBe(7)
     })
 
-    it('prefers the downstream version over the document store version', () => {
+    it('drops a downstream publish older than the document store version', () => {
         upstream.triggerNotification('textDocument/didOpen', {
             textDocument: { uri: 'file:///App.vue', languageId: 'vue', version: 5, text: '<template><div/></template>' }
         })
@@ -1362,8 +1362,7 @@ describe('document synchronization forwarding', () => {
         })
 
         const publish = upstream.sendNotification.mock.calls.find(([method]) => method === 'textDocument/publishDiagnostics')
-        expect(publish).toBeDefined()
-        expect((publish![1] as { version?: number }).version).toBe(4)
+        expect(publish).toBeUndefined()
     })
 
     it('stamps merged .vue diagnostics with the store version when downstream omits it', () => {

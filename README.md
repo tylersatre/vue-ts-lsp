@@ -172,7 +172,7 @@ Notes:
 
 ## Known limitations
 
-- Same-file diagnostics are reliable. Forwarded diagnostics now carry the document version they were computed against, so Claude Code drops pre-edit stragglers instead of attributing them to the current edit; a diagnostic can still land one turn late if the type check outruns Claude Code's read of it.
+- Forwarded diagnostics preserve the downstream document version when available, and the proxy prevents known older versions and cached pre-edit results from being merged into newer diagnostics. vtsls does not report a version, so its publishes use the document version at arrival; a late unversioned result can still be attributed to the current edit. A diagnostic can also land one turn late if the type check outruns Claude Code's read of it.
 - Cross-file diagnostics after changing exported function signatures, store APIs, or narrowed unions are improved but not guaranteed to appear immediately in every dependent file, especially in large mixed workspaces.
 - If your workflow depends on catching downstream breakage after API changes, do not treat "no diagnostic appeared" as proof that all callers are valid. Prefer `findReferences`, a targeted typecheck, or project-specific verification hooks for high-confidence changes.
 - Go-to-definition can be sensitive to the exact character position in complex TypeScript expressions such as `keyof typeof ...`. If a lookup misses unexpectedly, retry with the cursor placed directly on the referenced symbol.
@@ -181,6 +181,7 @@ Notes:
 - Project hooks that rewrite files after `Edit` or `Write` tool calls, such as running Prettier, can add an extra mutation step and make diagnostic timing harder to reason about.
 - After reverting a cross-file type break, dependent-file diagnostics may occasionally clear a beat later than the edit that fixed them.
 - `ignoreDirectories` can reduce noisy fallback scanning in projects with generated, vendored, or public asset trees, but it only affects proxy fallback scans, not TypeScript's own project graph.
+- Workspace reference fallbacks match identifier spelling and can include unrelated symbols with the same name. Their alias resolution reads root `tsconfig.json` and `jsconfig.json`, including inherited settings, but does not discover separate configurations through project references.
 
 ## Troubleshooting
 

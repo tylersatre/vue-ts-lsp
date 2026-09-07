@@ -44,10 +44,11 @@ export function forwardDiagnosticsUpstream(ctx: ProxyContext, uri: string, diagn
 
 /**
  * Claude Code drops publishDiagnostics whose version is older than its tracked document
- * version, so stamping an accurate version prevents pre-edit diagnostics from being
- * attributed to the current edit. The downstream-reported version wins (it reflects the
- * content actually diagnosed — vue_ls reports one, vtsls does not); otherwise fall back
- * to the open document's version at forward time.
+ * version. Prefer the downstream-reported version (vue_ls reports one, vtsls does
+ * not). Without one, the open document version records when the publish arrived,
+ * not necessarily which content was diagnosed; late unversioned results cannot be
+ * identified as stale. The merge store uses these versions to avoid retaining
+ * snapshots received before an edit in later publishes.
  */
 export function resolveDiagnosticsVersion(ctx: ProxyContext, uri: string, downstreamVersion: unknown): number | undefined {
     if (typeof downstreamVersion === 'number') {

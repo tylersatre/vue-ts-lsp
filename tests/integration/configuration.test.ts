@@ -148,12 +148,9 @@ describe('workspace/configuration handling', () => {
         expect(workspace['configuration']).toBe(true)
     })
 
-    it('sends workspace/didChangeConfiguration to both servers after initialized', async () => {
+    it('configures vtsls during initialize and Vue after initialized', async () => {
         setupProxy(upstream as unknown as MessageConnection, vtslsConn as unknown as MessageConnection, vueLsConn as unknown as MessageConnection)
         await upstream.triggerRequest('initialize', initParams)
-        vtslsConn.sendNotification.mockClear()
-        vueLsConn.sendNotification.mockClear()
-
         upstream.triggerNotification('initialized', {})
 
         expect(vtslsConn.sendNotification).toHaveBeenCalledWith(

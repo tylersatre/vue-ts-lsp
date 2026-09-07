@@ -1,3 +1,5 @@
+import { normalizeUriIdentity } from './helpers/uri.js'
+
 export interface DiagnosticPosition {
     line: number
     character: number
@@ -25,31 +27,41 @@ export function diagnosticKey(diagnostic: Diagnostic): string {
 
 /** Merges vtsls and vue_ls diagnostics for the same URI and drops exact duplicates. */
 export class DiagnosticsStore {
-    private readonly store = new Map<string, Map<ServerKey, Diagnostic[]>>()
+    private readonly store = new Map<string, { version?: number; byServer: Map<ServerKey, Diagnostic[]> }>()
 
-    update(uri: string, server: ServerKey, diagnostics: Diagnostic[]): Diagnostic[] {
-        let diagnosticsByServer = this.store.get(uri)
-        if (diagnosticsByServer === undefined) {
-            diagnosticsByServer = new Map<ServerKey, Diagnostic[]>()
-            this.store.set(uri, diagnosticsByServer)
+    update(uri: string, server: ServerKey, diagnostics: Diagnostic[], version?: number): Diagnostic[] {
+        uri = normalizeUriIdentity(uri)
+        let entry = this.store.get(uri)
+        if (entry === undefined) {
+            entry = { version, byServer: new Map<ServerKey, Diagnostic[]>() }
+            this.store.set(uri, entry)
+        } else if (version !== undefined) {
+            if (entry.version !== undefined && version < entry.version) return this.merge(uri)
+            // A publish for new content cannot reuse another server's older snapshot.
+            if (entry.version !== version) entry.byServer.clear()
+            entry.version = version
         }
-        diagnosticsByServer.set(server, diagnostics)
+        entry.byServer.set(server, diagnostics)
         return this.merge(uri)
     }
 
+    getVersion(uri: string): number | undefined {
+        return this.store.get(normalizeUriIdentity(uri))?.version
+    }
+
     remove(uri: string): void {
-        this.store.delete(uri)
+        this.store.delete(normalizeUriIdentity(uri))
     }
 
     /** Drops one server's entries everywhere — its knowledge is stale after a crash restart. */
     clearServer(server: ServerKey): void {
-        for (const diagnosticsByServer of this.store.values()) {
-            diagnosticsByServer.delete(server)
+        for (const entry of this.store.values()) {
+            entry.byServer.delete(server)
         }
     }
 
     private merge(uri: string): Diagnostic[] {
-        const diagnosticsByServer = this.store.get(uri)
+        const diagnosticsByServer = this.store.get(uri)?.byServer
         if (diagnosticsByServer === undefined) return []
 
         const seen = new Set<string>()

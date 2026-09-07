@@ -49,9 +49,9 @@ describe('.vue call hierarchy fallbacks', () => {
         await upstream.triggerRequest('initialize', initParams)
     })
 
-    it('builds incoming call hierarchy entries from references when vtsls returns none for .vue', async () => {
+    it.each([{ initialResult: [] }, { initialResult: null }])('builds incoming LSP calls for $initialResult', async ({ initialResult }) => {
         vtslsConn.sendRequest.mockImplementation(async (method: string) => {
-            if (method === 'callHierarchy/incomingCalls') return []
+            if (method === 'callHierarchy/incomingCalls') return initialResult
             if (method === 'textDocument/references') {
                 return [
                     {
@@ -113,11 +113,11 @@ describe('.vue call hierarchy fallbacks', () => {
                     end: { line: 6, character: 11 }
                 }
             }
-        })) as Array<{ from: { name: string }; fromSpans: unknown[] }>
+        })) as Array<{ from: { name: string }; fromRanges: unknown[] }>
 
         expect(result).toHaveLength(1)
         expect(result[0]?.from.name).toBe('button.action-button')
-        expect(result[0]?.fromSpans).toHaveLength(1)
+        expect(result[0]?.fromRanges).toHaveLength(1)
     })
 
     it('builds incoming call hierarchy entries for TS store methods called from Vue templates', async () => {
@@ -287,7 +287,7 @@ describe('.vue call hierarchy fallbacks', () => {
                                     end: { line: 0, character: 23 }
                                 }
                             },
-                            fromSpans: [
+                            fromRanges: [
                                 {
                                     start: { line: 5, character: 4 },
                                     end: { line: 5, character: 11 }
@@ -386,7 +386,7 @@ describe('.vue call hierarchy fallbacks', () => {
                                 end: { line: 4, character: 18 }
                             }
                         },
-                        fromSpans: [
+                        fromRanges: [
                             {
                                 start: { line: 5, character: 2 },
                                 end: { line: 5, character: 27 }
@@ -548,11 +548,11 @@ const click = (e: MouseEvent) => {
                     end: { line: 2, character: 11 }
                 }
             }
-        })) as Array<{ to: { name: string }; fromSpans: unknown[] }>
+        })) as Array<{ to: { name: string }; fromRanges: unknown[] }>
 
         expect(result).toHaveLength(1)
         expect(result[0]?.to.name).toBe('emit')
-        expect(result[0]?.fromSpans).toHaveLength(1)
+        expect(result[0]?.fromRanges).toHaveLength(1)
     })
 
     it('recovers prepareCallHierarchy for destructured composable returns via definition remapping', async () => {

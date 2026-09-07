@@ -340,6 +340,19 @@ describe('isVueTemplatePosition', () => {
 })
 
 describe('findReferenceTargetAtPosition', () => {
+    it.each([
+        'const result = requested()',
+        'function enclosing() { return requested() }',
+        'type Wrapper = requested',
+        '<script setup lang="ts">\nconst result = requested()\n</script>'
+    ])('keeps the reference target on the requested identifier in %s', (text) => {
+        const offset = text.indexOf('requested') + 3
+        const prefix = text.slice(0, offset).split('\n')
+        const position = { line: prefix.length - 1, character: prefix.at(-1)!.length }
+        const uri = text.startsWith('<script') ? 'file:///workspace/App.vue' : 'file:///workspace/a.ts'
+        expect(findReferenceTargetAtPosition(uri, text, position)).toMatchObject({ name: 'requested' })
+    })
+
     it('finds exported type aliases', () => {
         expect(findReferenceTargetAtPosition('file:///workspace/definitions/types.ts', TYPE_REFERENCE_FIXTURE, { line: 2, character: 15 })).toMatchObject({
             name: 'LineItemId',

@@ -336,6 +336,24 @@ describe('path alias resolution', () => {
     })
 
     describe('resolveFileCandidate', () => {
+        it.each([
+            ['.js', '.ts'],
+            ['.js', '.tsx'],
+            ['.js', '.d.ts'],
+            ['.jsx', '.tsx'],
+            ['.mjs', '.mts'],
+            ['.mjs', '.d.mts'],
+            ['.cjs', '.cts'],
+            ['.cjs', '.d.cts']
+        ])('resolves a %s import to its %s source before emitted JavaScript', (importExtension, sourceExtension) => {
+            const sourcePath = path.join(workDir, `mod${sourceExtension}`)
+            fs.writeFileSync(sourcePath, '')
+            fs.writeFileSync(path.join(workDir, `mod${importExtension}`), '')
+            expect(resolveFileCandidate(path.join(workDir, `mod${importExtension}`))).toBe(sourcePath)
+            fs.unlinkSync(path.join(workDir, `mod${importExtension}`))
+            expect(resolveFileCandidate(path.join(workDir, `mod${importExtension}`))).toBe(sourcePath)
+        })
+
         it('prefers the exact path, then tries extensions in order', () => {
             fs.writeFileSync(path.join(workDir, 'mod.ts'), '')
             fs.writeFileSync(path.join(workDir, 'mod.js'), '')
@@ -354,6 +372,55 @@ describe('path alias resolution', () => {
     })
 
     describe('loadPathAliasConfigs', () => {
+        it('resolves package-based extends and preserves inherited baseUrl when the child overrides paths', () => {
+            const packageDir = path.join(workDir, 'node_modules', '@fixture', 'tsconfig')
+            fs.mkdirSync(packageDir, { recursive: true })
+            fs.writeFileSync(path.join(packageDir, 'package.json'), JSON.stringify({ name: '@fixture/tsconfig', tsconfig: './base.json' }))
+            fs.writeFileSync(path.join(packageDir, 'base.json'), JSON.stringify({ compilerOptions: { baseUrl: '../../../src', paths: { '@/*': ['old/*'] } } }))
+            fs.writeFileSync(
+                path.join(workDir, 'tsconfig.json'),
+                JSON.stringify({ extends: '@fixture/tsconfig', compilerOptions: { paths: { '@/*': ['new/*'] } } })
+            )
+            expect(loadPathAliasConfigs(ctx, workDir)).toEqual([{ baseUrl: path.join(fs.realpathSync(workDir), 'src'), paths: { '@/*': ['new/*'] } }])
+        })
+
+        it('retains local aliases when an extended config is missing or cyclic', () => {
+            fs.writeFileSync(
+                path.join(workDir, 'tsconfig.json'),
+                JSON.stringify({ extends: './missing.json', compilerOptions: { paths: { '@/*': ['src/*'] } } })
+            )
+            fs.writeFileSync(
+                path.join(workDir, 'jsconfig.json'),
+                JSON.stringify({ extends: './jsconfig.json', compilerOptions: { paths: { 'lib/*': ['lib/*'] } } })
+            )
+            expect(loadPathAliasConfigs(ctx, workDir)).toEqual([
+                { baseUrl: workDir, paths: { '@/*': ['src/*'] } },
+                { baseUrl: workDir, paths: { 'lib/*': ['lib/*'] } }
+            ])
+        })
+
+        it.each([true, false])('inherits aliases relative to the defining config (baseUrl=%s)', (withBaseUrl) => {
+            fs.mkdirSync(path.join(workDir, 'config'))
+            fs.writeFileSync(
+                path.join(workDir, 'config', 'base.json'),
+                JSON.stringify({
+                    compilerOptions: { ...(withBaseUrl ? { baseUrl: '.' } : {}), paths: { '@/*': ['src/*'] } }
+                })
+            )
+            fs.writeFileSync(path.join(workDir, 'tsconfig.json'), JSON.stringify({ extends: './config/base.json' }))
+            expect(loadPathAliasConfigs(ctx, workDir)).toEqual([{ baseUrl: path.join(workDir, 'config'), paths: { '@/*': ['src/*'] } }])
+        })
+
+        it('uses child paths relative to the child config when overriding inherited paths without baseUrl', () => {
+            fs.mkdirSync(path.join(workDir, 'config'))
+            fs.writeFileSync(path.join(workDir, 'config', 'base.json'), JSON.stringify({ compilerOptions: { paths: { '@/*': ['old/*'] } } }))
+            fs.writeFileSync(
+                path.join(workDir, 'tsconfig.json'),
+                JSON.stringify({ extends: './config/base.json', compilerOptions: { paths: { '@/*': ['src/*'] } } })
+            )
+            expect(loadPathAliasConfigs(ctx, workDir)).toEqual([{ baseUrl: workDir, paths: { '@/*': ['src/*'] } }])
+        })
+
         it('reads baseUrl and paths from tsconfig.json', () => {
             fs.writeFileSync(path.join(workDir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { baseUrl: '.', paths: { '@/*': ['src/*'] } } }))
             const configs = loadPathAliasConfigs(ctx, workDir)
@@ -382,6 +449,18 @@ describe('path alias resolution', () => {
     })
 
     describe('resolveWorkspaceModuleSpecifier', () => {
+        it('finds importers through inherited aliases with JavaScript import extensions', () => {
+            fs.mkdirSync(path.join(workDir, 'config'))
+            fs.mkdirSync(path.join(workDir, 'src'))
+            const targetPath = path.join(workDir, 'src', 'helper.ts')
+            const importerPath = path.join(workDir, 'src', 'main.ts')
+            fs.writeFileSync(targetPath, 'export const helper = 1')
+            fs.writeFileSync(importerPath, "import { helper } from '@/helper.js'")
+            fs.writeFileSync(path.join(workDir, 'config', 'base.json'), JSON.stringify({ compilerOptions: { paths: { '@/*': ['../src/*'] } } }))
+            fs.writeFileSync(path.join(workDir, 'tsconfig.json'), JSON.stringify({ extends: './config/base.json' }))
+            expect(collectWorkspaceImporterUris(ctx, pathToFileURL(targetPath).href)).toEqual([pathToFileURL(importerPath).href])
+        })
+
         it('resolves relative imports against the requesting file', () => {
             fs.mkdirSync(path.join(workDir, 'src'))
             fs.writeFileSync(path.join(workDir, 'src', 'helper.ts'), '')

@@ -80,11 +80,15 @@ export function setupProxy(
         const vtslsInitResult = await ctx.currentVtsls.sendRequest('initialize', buildVtslsInitParams(params, vueTypescriptPluginLocation))
         logger.info('proxy', `initialize: vtsls capabilities: ${JSON.stringify((vtslsInitResult as Record<string, unknown>).capabilities)}`)
 
+        safeSendNotification(ctx.currentVtsls, 'initialized', {})
+        safeSendNotification(ctx.currentVtsls, 'workspace/didChangeConfiguration', {
+            settings: buildVtslsSettings(vueTypescriptPluginLocation)
+        })
+        setupTsserverRequestHandler(ctx, ctx.currentVueLs)
+
         logger.info('proxy', 'initialize: spawning vue_ls')
         const vueLsInitResult = await ctx.currentVueLs.sendRequest('initialize', buildVueLsInitParams(params))
         logger.info('proxy', `initialize: vue_ls capabilities: ${JSON.stringify((vueLsInitResult as Record<string, unknown>).capabilities)}`)
-
-        setupTsserverRequestHandler(ctx, ctx.currentVueLs)
 
         setupVtslsCrashRecovery(ctx, ctx.currentVtsls, ctx.recoverVtsls)
         setupVueLsCrashRecovery(ctx, ctx.currentVueLs, ctx.recoverVueLs)
@@ -109,13 +113,9 @@ export function setupProxy(
     })
 
     upstream.onNotification('initialized', (params: unknown) => {
-        safeSendNotification(ctx.currentVtsls, 'initialized', params)
         safeSendNotification(ctx.currentVueLs, 'initialized', params)
         if (ctx.savedVueTypescriptPluginLocation !== null) {
-            logger.debug('proxy', 'pushing workspace/didChangeConfiguration to child servers')
-            safeSendNotification(ctx.currentVtsls, 'workspace/didChangeConfiguration', {
-                settings: buildVtslsSettings(ctx.savedVueTypescriptPluginLocation)
-            })
+            logger.debug('proxy', 'pushing workspace/didChangeConfiguration to vue_ls')
             safeSendNotification(ctx.currentVueLs, 'workspace/didChangeConfiguration', {
                 settings: buildVueLsSettings()
             })
@@ -125,7 +125,15 @@ export function setupProxy(
     // Shutdown handling
     const shutdownTimeoutMs = crashOptions?.shutdownTimeoutMs ?? 5000
 
+    function stopRecovery(): void {
+        ctx.shuttingDown = true
+        for (const handler of ctx.recoveryShutdownHandlers) {
+            handler()
+        }
+    }
+
     async function performShutdown(): Promise<void> {
+        stopRecovery()
         async function shutdownServer(conn: MessageConnection, kill: (() => void) | undefined, name: string): Promise<void> {
             try {
                 await Promise.race([
@@ -144,11 +152,13 @@ export function setupProxy(
     // The child shutdown sequence must run at most once, whichever path triggers it
     // first — the LSP shutdown request, a signal, or the upstream connection closing.
     let shutdownStarted = false
+    let shutdownPromise: Promise<void> | null = null
+    const shutdownChildren = (): Promise<void> => (shutdownPromise ??= performShutdown())
     let exitStarted = false
 
     upstream.onRequest('shutdown', async () => {
         shutdownStarted = true
-        await performShutdown()
+        await shutdownChildren()
         return null
     })
 
@@ -161,6 +171,7 @@ export function setupProxy(
     }
 
     upstream.onNotification('exit', () => {
+        stopRecovery()
         safeSendNotification(ctx.currentVtsls, 'exit')
         safeSendNotification(ctx.currentVueLs, 'exit')
         flushLogsAndExit()
@@ -178,7 +189,7 @@ export function setupProxy(
             return
         }
         shutdownStarted = true
-        void performShutdown().then(flushLogsAndExit, flushLogsAndExit)
+        void shutdownChildren().then(flushLogsAndExit, flushLogsAndExit)
     }
     if (activeShutdownSignalHandler !== null) {
         process.off('SIGINT', activeShutdownSignalHandler)

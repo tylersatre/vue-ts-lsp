@@ -149,16 +149,24 @@ export function loadPathAliasConfigs(ctx: ProxyContext, rootPath: string): PathA
             continue
         }
 
-        const compilerOptions = (readResult.config.compilerOptions ?? {}) as {
-            baseUrl?: string
-            paths?: Record<string, string[]>
-        }
+        // Let TypeScript resolve extends (including package configs) and preserve
+        // the directory where relative options were declared. Only options are
+        // needed here: do not enumerate an entire project's input files.
+        const { options: compilerOptions } = ts.parseJsonConfigFileContent(
+            readResult.config,
+            { ...ts.sys, readDirectory: () => [] },
+            path.dirname(configPath),
+            undefined,
+            configPath
+        )
         if (compilerOptions.baseUrl === undefined && compilerOptions.paths === undefined) {
             continue
         }
 
+        // TypeScript retains pathsBasePath for paths inherited without baseUrl.
+        const pathsBasePath = typeof compilerOptions.pathsBasePath === 'string' ? compilerOptions.pathsBasePath : path.dirname(configPath)
         configs.push({
-            baseUrl: path.resolve(path.dirname(configPath), compilerOptions.baseUrl ?? '.'),
+            baseUrl: compilerOptions.baseUrl ?? pathsBasePath,
             paths: compilerOptions.paths ?? {}
         })
     }
@@ -168,7 +176,19 @@ export function loadPathAliasConfigs(ctx: ProxyContext, rootPath: string): PathA
 }
 
 export function resolveFileCandidate(basePath: string): string | null {
+    // Runtime import extensions can refer to TypeScript source even when emitted
+    // JavaScript is present beside it. Match TypeScript's extension substitution
+    // before falling back to the ordinary Vue/extensionless candidate scan.
+    const extension = path.extname(basePath)
+    const sourceExtensions: Record<string, string[]> = {
+        '.js': ['.ts', '.tsx', '.d.ts', '.js', '.jsx'],
+        '.jsx': ['.tsx', '.ts', '.d.ts', '.jsx', '.js'],
+        '.mjs': ['.mts', '.d.mts', '.mjs'],
+        '.cjs': ['.cts', '.d.cts', '.cjs']
+    }
+    const substitutions = sourceExtensions[extension]?.map((candidateExtension) => basePath.slice(0, -extension.length) + candidateExtension) ?? []
     const candidates = new Set<string>([
+        ...substitutions,
         basePath,
         `${basePath}.ts`,
         `${basePath}.tsx`,

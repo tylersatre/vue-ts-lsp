@@ -911,6 +911,41 @@ describe('LSP request forwarding', () => {
         }
     })
 
+    it('uses the requested call identifier instead of its enclosing function for reference fallback', async () => {
+        const tempWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'vue-ts-lsp-reference-target-'))
+        const sourcePath = path.join(tempWorkspace, 'source.ts')
+        const consumerPath = path.join(tempWorkspace, 'consumer.ts')
+        const unrelatedPath = path.join(tempWorkspace, 'unrelated.ts')
+        const sourceText = 'function enclosing() { return requested() }'
+        fs.writeFileSync(sourcePath, sourceText)
+        fs.writeFileSync(consumerPath, 'requested()')
+        fs.writeFileSync(unrelatedPath, 'enclosing()')
+
+        try {
+            const localUpstream = createMockConnection()
+            const localVtsls = createMockConnection()
+            const localVueLs = createMockConnection()
+            setupProxy(localUpstream as unknown as MessageConnection, localVtsls as unknown as MessageConnection, localVueLs as unknown as MessageConnection)
+            await localUpstream.triggerRequest('initialize', {
+                rootUri: pathToFileURL(tempWorkspace).href,
+                capabilities: {}
+            })
+            localUpstream.triggerNotification('textDocument/didOpen', {
+                textDocument: { uri: pathToFileURL(sourcePath).href, languageId: 'typescript', version: 1, text: sourceText }
+            })
+            localVtsls.sendRequest.mockImplementation(async (method: string) => (method === 'textDocument/references' ? [] : { capabilities: {} }))
+            const result = (await localUpstream.triggerRequest('textDocument/references', {
+                textDocument: { uri: pathToFileURL(sourcePath).href },
+                position: { line: 0, character: sourceText.indexOf('requested') + 3 },
+                context: { includeDeclaration: true }
+            })) as Array<{ uri: string }>
+            expect(result.map((entry) => entry.uri)).toContain(pathToFileURL(consumerPath).href)
+            expect(result.map((entry) => entry.uri)).not.toContain(pathToFileURL(unrelatedPath).href)
+        } finally {
+            fs.rmSync(tempWorkspace, { recursive: true, force: true })
+        }
+    })
+
     it('fills in cross-file references for exported type aliases when vtsls only returns same-file hits', async () => {
         const tempWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'vue-ts-lsp-refs-'))
         const typesPath = path.join(tempWorkspace, 'definitions', 'types.ts')

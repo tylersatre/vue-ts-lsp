@@ -209,6 +209,55 @@ describe('recoverVtsls', () => {
         )
     })
 
+    it('retries a synchronous spawn failure and publishes the next healthy candidate', async () => {
+        const { ctx, recoveredConn, spawnVtsls, spawnedKill } = createVtslsRecoveryContext()
+        spawnVtsls.mockImplementationOnce(() => {
+            throw new Error('spawn failed')
+        })
+
+        await recoverVtsls(ctx, 'connection closed', () => {})
+
+        expect(spawnVtsls).toHaveBeenCalledTimes(2)
+        expect(ctx.vtslsConsecutiveRecoveryFailures).toBe(1)
+        expect(ctx.currentVtsls).toBe(recoveredConn)
+        expect(spawnedKill).not.toHaveBeenCalled()
+    })
+
+    it('bounds synchronous spawn failures even when the sliding retry window expires', async () => {
+        const { ctx, oldVtsls, spawnVtsls } = createVtslsRecoveryContext({ maxRestarts: 2, windowMs: 1, delayMs: 5 })
+        spawnVtsls.mockImplementation(() => {
+            throw new Error('spawn failed')
+        })
+
+        await expect(recoverVtsls(ctx, 'connection closed', () => {})).rejects.toThrow('spawn failed')
+
+        expect(spawnVtsls).toHaveBeenCalledTimes(2)
+        expect(ctx.vtslsConsecutiveRecoveryFailures).toBe(2)
+        expect(ctx.currentVtsls).toBe(oldVtsls)
+        expect(ctx.vtslsRecoveryPromise).toBeNull()
+        expect(ctx.recoveryShutdownHandlers.size).toBe(0)
+        expect((ctx.upstream as unknown as MockConnection).sendNotification).toHaveBeenCalledWith(
+            'window/showMessage',
+            expect.objectContaining({ message: expect.stringContaining('crashed too many times') })
+        )
+    })
+
+    it('cleans up a candidate that fails initialization after an earlier synchronous spawn failure', async () => {
+        const { ctx, oldVtsls, recoveredConn, spawnVtsls, spawnedKill } = createVtslsRecoveryContext({ maxRestarts: 2 })
+        spawnVtsls.mockImplementationOnce(() => {
+            throw new Error('spawn failed')
+        })
+        recoveredConn.sendRequest.mockRejectedValue(new Error('initialize failed'))
+
+        await expect(recoverVtsls(ctx, 'connection closed', () => {})).rejects.toThrow('initialize failed')
+
+        expect(spawnVtsls).toHaveBeenCalledTimes(2)
+        expect(ctx.currentVtsls).toBe(oldVtsls)
+        expect(spawnedKill).toHaveBeenCalledOnce()
+        expect(recoveredConn.dispose).toHaveBeenCalledOnce()
+        expect(ctx.recoveryShutdownHandlers.size).toBe(0)
+    })
+
     it('kills and disposes the spawned child, leaving the old connection published, when initialize fails', async () => {
         const { ctx, oldVtsls, recoveredConn, spawnedKill } = createVtslsRecoveryContext({ maxRestarts: 1 })
         recoveredConn.sendRequest.mockRejectedValue(new Error('initialize failed'))

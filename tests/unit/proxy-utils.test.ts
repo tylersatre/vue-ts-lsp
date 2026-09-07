@@ -139,29 +139,34 @@ describe('mergeIncomingCallResults', () => {
     })
     const span = (line: number) => ({ start: { line, character: 0 }, end: { line, character: 5 } })
 
-    it('returns the initial result untouched when it is not an array or fallback is empty', () => {
-        expect(mergeIncomingCallResults(null, [{ from: item('file:///a.ts'), fromSpans: [] }])).toBeNull()
-        const initial = [{ from: item('file:///a.ts'), fromSpans: [span(1)] }]
+    it('returns fallback calls when the downstream result is null', () => {
+        const fallback = [{ from: item('file:///a.ts'), fromRanges: [span(1)] }]
+        expect(mergeIncomingCallResults(null, fallback)).toEqual(fallback)
+    })
+
+    it('returns the initial result untouched when fallback is empty', () => {
+        expect(mergeIncomingCallResults(null, [])).toBeNull()
+        const initial = [{ from: item('file:///a.ts'), fromRanges: [span(1)] }]
         expect(mergeIncomingCallResults(initial, [])).toBe(initial)
     })
 
     it('appends fallback calls from new callers', () => {
-        const initial = [{ from: item('file:///a.ts'), fromSpans: [span(1)] }]
-        const merged = mergeIncomingCallResults(initial, [{ from: item('file:///b.ts'), fromSpans: [span(2)] }]) as unknown[]
+        const initial = [{ from: item('file:///a.ts'), fromRanges: [span(1)] }]
+        const merged = mergeIncomingCallResults(initial, [{ from: item('file:///b.ts'), fromRanges: [span(2)] }]) as unknown[]
         expect(merged).toHaveLength(2)
     })
 
-    it('merges fromSpans into an existing caller in place (documented aliasing)', () => {
-        const existingEntry = { from: item('file:///a.ts'), fromSpans: [span(1)] }
-        const merged = mergeIncomingCallResults([existingEntry], [{ from: item('file:///a.ts'), fromSpans: [span(1), span(3)] }]) as Array<{
-            fromSpans: unknown[]
+    it('merges fromRanges into an existing caller in place (documented aliasing)', () => {
+        const existingEntry = { from: item('file:///a.ts'), fromRanges: [span(1)] }
+        const merged = mergeIncomingCallResults([existingEntry], [{ from: item('file:///a.ts'), fromRanges: [span(1), span(3)] }]) as Array<{
+            fromRanges: unknown[]
         }>
 
         expect(merged).toHaveLength(1)
-        expect(merged[0]!.fromSpans).toHaveLength(2)
+        expect(merged[0]!.fromRanges).toHaveLength(2)
         // The merge intentionally mutates the entry borrowed from the initial result —
         // this pin exists so any future change to that contract is deliberate.
-        expect(existingEntry.fromSpans).toHaveLength(2)
+        expect(existingEntry.fromRanges).toHaveLength(2)
     })
 })
 

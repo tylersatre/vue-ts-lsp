@@ -1,5 +1,5 @@
 import type { MessageConnection } from 'vscode-jsonrpc/node'
-import type { Position, Range } from 'vscode-languageserver-protocol'
+import type { CallHierarchyIncomingCall, Position, Range } from 'vscode-languageserver-protocol'
 import type { LogLevel } from './logger.js'
 
 export type ContentChange = {
@@ -48,7 +48,7 @@ export type TsserverQuickInfoBodyLike = {
 
 export type IncomingCallLike = {
     from: CallHierarchyItemLike
-    fromSpans: Range[]
+    fromRanges: CallHierarchyIncomingCall['fromRanges']
 }
 
 export type SpawnedConnection =

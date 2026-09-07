@@ -85,6 +85,33 @@ describe('setupProxy', () => {
         expect(vueLsIdx).toBeGreaterThan(vtslsIdx)
     })
 
+    it('completes the vtsls handshake before Vue initialization and answers startup bridge requests', async () => {
+        const bridged = createDeferred<void>()
+        vtslsConn.sendRequest.mockImplementation(async (method: string) =>
+            method === 'workspace/executeCommand' ? { body: { ready: true } } : { capabilities: {} }
+        )
+        vueLsConn.sendNotification.mockImplementation((method: string, params: unknown) => {
+            if (method === 'tsserver/response') {
+                expect(params).toEqual([71, { ready: true }])
+                bridged.resolve()
+            }
+        })
+        vueLsConn.sendRequest.mockImplementation(async () => {
+            expect(vtslsConn.sendNotification).toHaveBeenCalledWith('initialized', {})
+            expect(vtslsConn.sendNotification).toHaveBeenCalledWith('workspace/didChangeConfiguration', expect.anything())
+            vueLsConn.triggerNotification('tsserver/request', [71, 'projectInfo', { file: '/workspace/App.vue' }])
+            await bridged.promise
+            return { capabilities: {} }
+        })
+
+        await upstream.triggerRequest('initialize', initParams)
+        upstream.triggerNotification('initialized', {})
+
+        expect(vtslsConn.sendNotification.mock.calls.filter(([method]) => method === 'initialized')).toHaveLength(1)
+        expect(vueLsConn.sendNotification.mock.calls.filter(([method]) => method === 'initialized')).toHaveLength(1)
+        expect(vtslsConn.sendNotification.mock.calls.filter(([method]) => method === 'workspace/didChangeConfiguration')).toHaveLength(1)
+    })
+
     it('sends vtsls initialize with correct rootUri and workspaceFolders', async () => {
         await upstream.triggerRequest('initialize', initParams)
 
@@ -145,14 +172,15 @@ describe('setupProxy', () => {
         })
     })
 
-    it('forwards initialized notification to both child servers', () => {
+    it('initializes both child servers across the upstream handshake', async () => {
+        await upstream.triggerRequest('initialize', initParams)
         upstream.triggerNotification('initialized', {})
 
         expect(vtslsConn.sendNotification).toHaveBeenCalledWith('initialized', {})
         expect(vueLsConn.sendNotification).toHaveBeenCalledWith('initialized', {})
     })
 
-    it('registers tsserver/request handler on vue_ls after initialization', async () => {
+    it('registers tsserver/request handler on vue_ls for initialization', async () => {
         await upstream.triggerRequest('initialize', initParams)
 
         expect(vueLsConn.onNotification).toHaveBeenCalledWith('tsserver/request', expect.any(Function))

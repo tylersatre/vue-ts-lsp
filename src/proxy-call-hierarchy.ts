@@ -140,7 +140,7 @@ export async function buildIncomingCallFallback(ctx: ProxyContext, params: unkno
     const locations = (Array.isArray(references) ? references.filter(isLocation).filter((location) => !isInternalProbeUri(location.uri)) : []).filter(
         (location) => includeSameFileReferences || location.uri !== item.uri
     )
-    const grouped = new Map<string, { from: CallHierarchyItemLike; fromSpans: Range[] }>()
+    const grouped = new Map<string, { from: CallHierarchyItemLike; fromRanges: Range[] }>()
 
     for (const location of locations) {
         let from = buildSyntheticItem(location.uri, basenameFromUri(location.uri), 2, location.range)
@@ -157,8 +157,8 @@ export async function buildIncomingCallFallback(ctx: ProxyContext, params: unkno
         }
 
         const key = itemKey(from)
-        const existing = grouped.get(key) ?? { from, fromSpans: [] }
-        existing.fromSpans.push(location.range)
+        const existing = grouped.get(key) ?? { from, fromRanges: [] }
+        existing.fromRanges.push(location.range)
         grouped.set(key, existing)
     }
 
@@ -191,13 +191,13 @@ export async function buildOutgoingCallFallback(ctx: ProxyContext, params: unkno
         logger.debug('proxy', `callHierarchy/outgoingCalls fallback symbols uri=${item.uri} ERROR: ${msg}`)
     }
 
-    const grouped = new Map<string, { to: CallHierarchyItemLike; fromSpans: Range[] }>()
+    const grouped = new Map<string, { to: CallHierarchyItemLike; fromRanges: Range[] }>()
     for (const call of calls) {
         const symbol = symbols === null ? null : findSymbolByName(symbols, call.name, item.uri)
         const to = symbol !== null ? toCallHierarchyItem(symbol) : buildSyntheticItem(item.uri, call.name, 12, call.range)
         const key = itemKey(to)
-        const existing = grouped.get(key) ?? { to, fromSpans: [] }
-        existing.fromSpans.push(call.range)
+        const existing = grouped.get(key) ?? { to, fromRanges: [] }
+        existing.fromRanges.push(call.range)
         grouped.set(key, existing)
     }
 
