@@ -51,7 +51,7 @@ jobs:
             # works while the trusted-publisher entry for vue-ts-lsp exists on
             # npmjs.com; if that entry is lost, this step fails with a bare auth error.
             - name: Create release PR or GitHub Release
-              uses: changesets/action@v1
+              uses: changesets/action@v2
               with:
                   title: 'Version Packages'
                   commit: 'chore: version packages'
