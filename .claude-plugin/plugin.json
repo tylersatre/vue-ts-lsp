@@ -9,10 +9,5 @@
     "homepage": "https://github.com/tylersatre/vue-ts-lsp",
     "repository": "https://github.com/tylersatre/vue-ts-lsp",
     "license": "MIT",
-    "keywords": [
-        "lsp",
-        "vue",
-        "typescript",
-        "language-server"
-    ]
+    "keywords": ["lsp", "vue", "typescript", "language-server"]
 }
